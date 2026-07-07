@@ -39,7 +39,13 @@ namespace TA.ArtTools.Editor
 
         readonly List<UnityEngine.Object> targets = new List<UnityEngine.Object>();
         readonly List<ScanObjectResult> results = new List<ScanObjectResult>();
+        // 结果过滤 Shader；为空时显示全量扫描结果。
+        Shader resultFilterShader;
+        // 过滤启用时是否显示命中对象内未使用过滤 Shader 的材质槽。
+        bool showNonFilterShaderSlots;
+        // 批量替换时写入材质的目标 Shader。
         Shader replaceShader;
+        // 替换 URP 包内默认 Lit.mat 引用时使用的材质。
         Material replaceDefaultLitMaterial;
 
         public override string DisplayName => "Shader Usage Analyzer";
@@ -53,7 +59,8 @@ namespace TA.ArtTools.Editor
             "3. 如果场景对象解析到的是 .fbx，会跳过，避免误处理模型源文件。\n" +
             "4. 项目内可编辑 .mat 可以勾选后批量替换 Shader。\n" +
             "5. 使用 URP 包内默认 Lit.mat 的材质槽不能直接改 Shader，可以一键替换为指定材质球。\n" +
-            "6. 空材质槽会列出来，但不会自动处理。";
+            "6. 空材质槽会列出来，但不会自动处理。\n" +
+            "7. 结果过滤 Shader 只影响显示、报告和当前过滤下的替换范围，不会重新扫描资源。";
 
         public override VisualElement CreateView(ArtToolContext context)
         {
@@ -151,33 +158,67 @@ namespace TA.ArtTools.Editor
 
             root.Add(ActionRow(
                 ActionButton("扫描", () => AnalyzeShaderUsage(context)),
-                ActionButton("自动勾选 Lit Shader 材质", () =>
-                {
-                    if (results.Count == 0)
-                        ScanUsageResults();
-                    SelectEditableURPLitShaderMaterials();
-                    ShowUsageResults(context, "已自动勾选可编辑的 URP Lit Shader 材质。");
-                }),
                 ActionButton("取消材质勾选", () =>
                 {
                     ClearMaterialSelection();
                     ShowUsageResults(context, "已取消材质勾选。");
                 })));
 
+            var filterRow = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center } };
+            var resultFilterField = new ObjectField("结果过滤 Shader") { objectType = typeof(Shader), value = resultFilterShader };
+            resultFilterField.style.width = 420;
+            resultFilterField.style.minWidth = 260;
+            resultFilterField.style.maxWidth = 460;
+            resultFilterField.style.flexShrink = 1;
+            var showNonFilterSlotsToggle = new Toggle("显示非过滤 Shader 槽位") { value = showNonFilterShaderSlots };
+            showNonFilterSlotsToggle.style.marginLeft = 6;
+            showNonFilterSlotsToggle.style.marginRight = 6;
+            showNonFilterSlotsToggle.style.flexShrink = 0;
+            showNonFilterSlotsToggle.SetEnabled(IsResultFilterEnabled());
+            resultFilterField.RegisterValueChangedCallback(evt =>
+            {
+                resultFilterShader = evt.newValue as Shader;
+                showNonFilterSlotsToggle.SetEnabled(IsResultFilterEnabled());
+                RefreshUsageResultsIfAvailable(context, "Shader 结果过滤已更新。");
+            });
+            showNonFilterSlotsToggle.RegisterValueChangedCallback(evt =>
+            {
+                showNonFilterShaderSlots = evt.newValue;
+                RefreshUsageResultsIfAvailable(context, showNonFilterShaderSlots
+                    ? "已显示命中对象内的非过滤 Shader 槽位。"
+                    : "已隐藏命中对象内的非过滤 Shader 槽位。");
+            });
+            filterRow.Add(resultFilterField);
+            var clearFilterButton = ActionButton("清除过滤", () =>
+            {
+                resultFilterShader = null;
+                resultFilterField.SetValueWithoutNotify(null);
+                showNonFilterSlotsToggle.SetEnabled(false);
+                RefreshUsageResultsIfAvailable(context, "已清除 Shader 结果过滤。");
+            });
+            clearFilterButton.style.flexShrink = 0;
+            filterRow.Add(clearFilterButton);
+            filterRow.Add(showNonFilterSlotsToggle);
+            var autoSelectFilterShaderButton = ActionButton("自动勾选过滤shader的材质", () => AutoSelectFilterShaderMaterials(context));
+            autoSelectFilterShaderButton.style.flexShrink = 0;
+            autoSelectFilterShaderButton.style.marginRight = 0;
+            filterRow.Add(autoSelectFilterShaderButton);
+            root.Add(filterRow);
+
             var shaderField = new ObjectField("替换目标 Shader") { objectType = typeof(Shader), value = replaceShader };
             shaderField.RegisterValueChangedCallback(evt => replaceShader = evt.newValue as Shader);
             root.Add(shaderField);
 
-            var materialField = new ObjectField("默认 Lit 替换材质") { objectType = typeof(Material), value = replaceDefaultLitMaterial };
+            var materialField = new ObjectField("替换目标材质") { objectType = typeof(Material), value = replaceDefaultLitMaterial };
             materialField.RegisterValueChangedCallback(evt => replaceDefaultLitMaterial = evt.newValue as Material);
             root.Add(materialField);
 
             root.Add(ActionRow(
                 ActionButton("替换勾选材质 Shader", () => ReplaceSelectedMaterialShaders(context)),
-                ActionButton("替换默认 Lit 材质引用", () => ReplacePackageDefaultLitMaterialReferences(context))));
+                ActionButton("将默认 Lit 引用替换为目标材质", () => ReplacePackageDefaultLitMaterialReferences(context))));
 
             root.Add(new HelpBox(
-                "文件夹会扫描 Prefab 和 Material 资源。Hierarchy 中的 Prefab 实例会解析到对应 Prefab 资产。可编辑材质槽可勾选后替换；URP 包内 Lit.mat 引用会在 Prefab 资产上替换。",
+                "文件夹会扫描 Prefab 和 Material 资源。Hierarchy 中的 Prefab 实例会解析到对应 Prefab 资产。可编辑材质槽可勾选后替换；URP 包内 Lit.mat 引用会在 Prefab 资产上替换为目标材质。",
                 HelpBoxMessageType.Info));
             return root;
         }
@@ -218,18 +259,21 @@ namespace TA.ArtTools.Editor
             ScanUsageResults();
 
             var report = ArtToolReport.Empty(PanelTitle);
-            int totalSlots = results.Sum(r => r.Slots.Count);
-            int editableCount = results.Sum(r => r.Slots.Count(s => s.Editable));
-            int packageDefaultLitCount = results.Sum(r => r.Slots.Count(s => s.IsPackageDefaultLitMaterial));
-            int missingCount = results.Sum(r => r.Slots.Count(s => s.IsMissingMaterial));
+            List<ScanObjectResult> visibleResults = GetVisibleResults().ToList();
+            List<MaterialSlotInfo> visibleSlots = visibleResults.SelectMany(GetVisibleSlots).ToList();
+            int totalSlots = visibleSlots.Count;
+            int editableCount = visibleSlots.Count(s => s.Editable);
+            int packageDefaultLitCount = visibleSlots.Count(s => s.IsPackageDefaultLitMaterial);
+            int missingCount = visibleSlots.Count(s => s.IsMissingMaterial);
+            int matchingSlotCount = visibleResults.Sum(CountMatchingSlots);
 
             report.Changes.Add(ArtToolChange.Info(
                 "Shader 使用统计",
-                $"对象: {results.Count}，材质槽: {totalSlots}，可编辑: {editableCount}，默认 Lit 材质槽: {packageDefaultLitCount}，空材质槽: {missingCount}"));
+                BuildSummaryText(visibleResults.Count, totalSlots, editableCount, packageDefaultLitCount, missingCount, matchingSlotCount, 0)));
 
-            foreach (ScanObjectResult result in results)
+            foreach (ScanObjectResult result in visibleResults)
             {
-                foreach (MaterialSlotInfo slot in result.Slots)
+                foreach (MaterialSlotInfo slot in GetVisibleSlots(result))
                 {
                     report.Changes.Add(ArtToolChange.Info(
                         GetSlotStatus(slot),
@@ -245,7 +289,8 @@ namespace TA.ArtTools.Editor
         void AnalyzeShaderUsage(ArtToolContext context)
         {
             ScanUsageResults();
-            ShowUsageResults(context, $"Shader 使用统计：{results.Count} 个对象，{results.Sum(r => r.Slots.Count)} 个材质槽。");
+            List<ScanObjectResult> visibleResults = GetVisibleResults().ToList();
+            ShowUsageResults(context, $"Shader 使用统计：显示 {visibleResults.Count}/{results.Count} 个对象，{visibleResults.Sum(CountVisibleSlots)} 个材质槽。");
         }
 
         void ShowUsageResults(ArtToolContext context, string status)
@@ -253,16 +298,32 @@ namespace TA.ArtTools.Editor
             context.ShowCustomView?.Invoke(BuildUsageResultsView(context), status);
         }
 
+        /// <summary>
+        /// 已有扫描结果时刷新右侧结果区，否则只更新状态提示。
+        /// </summary>
+        /// <param name="context">当前工具窗口上下文。</param>
+        /// <param name="status">本次刷新对应的状态文本。</param>
+        void RefreshUsageResultsIfAvailable(ArtToolContext context, string status)
+        {
+            if (results.Count > 0)
+                ShowUsageResults(context, status);
+            else
+                context.Log?.Invoke(status);
+        }
+
         VisualElement BuildUsageResultsView(ArtToolContext context)
         {
             var root = new VisualElement();
-            int totalSlots = results.Sum(r => r.Slots.Count);
-            int editableCount = results.Sum(r => r.Slots.Count(s => s.Editable));
-            int packageDefaultLitCount = results.Sum(r => r.Slots.Count(s => s.IsPackageDefaultLitMaterial));
-            int missingCount = results.Sum(r => r.Slots.Count(s => s.IsMissingMaterial));
-            int selectedCount = results.Sum(r => r.Slots.Count(s => s.Selected));
+            List<ScanObjectResult> visibleResults = GetVisibleResults().ToList();
+            List<MaterialSlotInfo> visibleSlots = visibleResults.SelectMany(GetVisibleSlots).ToList();
+            int totalSlots = visibleSlots.Count;
+            int editableCount = visibleSlots.Count(s => s.Editable);
+            int packageDefaultLitCount = visibleSlots.Count(s => s.IsPackageDefaultLitMaterial);
+            int missingCount = visibleSlots.Count(s => s.IsMissingMaterial);
+            int selectedCount = visibleSlots.Count(s => s.Selected);
+            int matchingSlotCount = visibleResults.Sum(CountMatchingSlots);
 
-            var summary = new Label($"对象 {results.Count} | 材质槽 {totalSlots} | 可编辑 {editableCount} | 包内 Lit.mat {packageDefaultLitCount} | 空材质 {missingCount} | 已勾选 {selectedCount}");
+            var summary = new Label(BuildSummaryText(visibleResults.Count, totalSlots, editableCount, packageDefaultLitCount, missingCount, matchingSlotCount, selectedCount));
             summary.style.unityFontStyleAndWeight = FontStyle.Bold;
             summary.style.marginBottom = 6;
             root.Add(summary);
@@ -270,6 +331,12 @@ namespace TA.ArtTools.Editor
             if (results.Count == 0)
             {
                 root.Add(new HelpBox("暂无扫描结果。请拖入对象或选择 Prefab / Material / 文件夹后点击“扫描”。", HelpBoxMessageType.Info));
+                return root;
+            }
+
+            if (visibleResults.Count == 0)
+            {
+                root.Add(new HelpBox("当前 Shader 过滤没有命中对象。请更换过滤 Shader 或点击“清除过滤”。", HelpBoxMessageType.Info));
                 return root;
             }
 
@@ -282,9 +349,9 @@ namespace TA.ArtTools.Editor
             header.Add(HeaderLabel("路径 / 说明", 260));
             root.Add(header);
 
-            foreach (ScanObjectResult result in results)
+            foreach (ScanObjectResult result in visibleResults)
             {
-                var foldout = new Foldout { text = $"{result.SourcePath}    ({result.Slots.Count} material slots)", value = result.Foldout };
+                var foldout = new Foldout { text = BuildFoldoutTitle(result), value = result.Foldout };
                 foldout.RegisterValueChangedCallback(evt => result.Foldout = evt.newValue);
 
                 var objectRow = new VisualElement { style = { flexDirection = FlexDirection.Row, marginBottom = 4 } };
@@ -301,7 +368,7 @@ namespace TA.ArtTools.Editor
                 }
                 foldout.Add(objectRow);
 
-                foreach (MaterialSlotInfo slot in result.Slots)
+                foreach (MaterialSlotInfo slot in GetVisibleSlots(result))
                     foldout.Add(BuildSlotRow(slot, context));
 
                 root.Add(foldout);
@@ -316,6 +383,43 @@ namespace TA.ArtTools.Editor
             label.style.width = width;
             label.style.unityFontStyleAndWeight = FontStyle.Bold;
             return label;
+        }
+
+        /// <summary>
+        /// 构建结果摘要文本。
+        /// </summary>
+        /// <param name="visibleObjectCount">当前过滤后显示的对象数量。</param>
+        /// <param name="totalSlots">当前过滤后显示的材质槽数量。</param>
+        /// <param name="editableCount">当前过滤后显示的可编辑材质槽数量。</param>
+        /// <param name="packageDefaultLitCount">当前过滤后显示的包内 Lit.mat 槽数量。</param>
+        /// <param name="missingCount">当前过滤后显示的空材质槽数量。</param>
+        /// <param name="matchingSlotCount">当前过滤后命中过滤 Shader 的槽位数量。</param>
+        /// <param name="selectedCount">当前过滤后显示的已勾选材质槽数量。</param>
+        /// <returns>用于报告和右侧结果区的摘要文本。</returns>
+        string BuildSummaryText(int visibleObjectCount, int totalSlots, int editableCount, int packageDefaultLitCount, int missingCount, int matchingSlotCount, int selectedCount)
+        {
+            string objectText = IsResultFilterEnabled() ? $"{visibleObjectCount}/{results.Count}" : visibleObjectCount.ToString();
+            string filterText = IsResultFilterEnabled() ? $" | 命中槽 {matchingSlotCount} | 过滤 {GetObjectName(resultFilterShader)}" : "";
+            string selectedText = $" | 已勾选 {selectedCount}";
+            return $"对象 {objectText} | 材质槽 {totalSlots} | 可编辑 {editableCount} | 包内 Lit.mat {packageDefaultLitCount} | 空材质 {missingCount}{filterText}{selectedText}";
+        }
+
+        /// <summary>
+        /// 构建对象 Foldout 标题。
+        /// </summary>
+        /// <param name="result">单个扫描对象结果。</param>
+        /// <returns>包含槽位数量和过滤命中数量的标题。</returns>
+        string BuildFoldoutTitle(ScanObjectResult result)
+        {
+            if (result == null)
+                return "";
+
+            int visibleSlotCount = CountVisibleSlots(result);
+            string slotText = visibleSlotCount == result.Slots.Count
+                ? $"{result.Slots.Count} material slots"
+                : $"{visibleSlotCount}/{result.Slots.Count} material slots";
+            string matchText = IsResultFilterEnabled() ? $" | 命中 {CountMatchingSlots(result)}" : "";
+            return $"{result.SourcePath}    ({slotText}{matchText})";
         }
 
         VisualElement BuildSlotRow(MaterialSlotInfo slot, ArtToolContext context)
@@ -375,6 +479,79 @@ namespace TA.ArtTools.Editor
                 return;
 
             targets.Add(resolved);
+        }
+
+        /// <summary>
+        /// 返回当前过滤后需要显示或参与替换的扫描对象。
+        /// </summary>
+        IEnumerable<ScanObjectResult> GetVisibleResults()
+        {
+            foreach (ScanObjectResult result in results)
+            {
+                if (ShouldDisplayResult(result))
+                    yield return result;
+            }
+        }
+
+        /// <summary>
+        /// 返回单个扫描对象在当前过滤设置下需要显示或参与替换的材质槽。
+        /// </summary>
+        /// <param name="result">单个扫描对象结果。</param>
+        /// <returns>当前可见的材质槽集合。</returns>
+        IEnumerable<MaterialSlotInfo> GetVisibleSlots(ScanObjectResult result)
+        {
+            if (result == null)
+                yield break;
+
+            foreach (MaterialSlotInfo slot in result.Slots)
+            {
+                if (ShouldDisplaySlot(slot))
+                    yield return slot;
+            }
+        }
+
+        /// <summary>
+        /// 判断材质槽是否应该显示在当前结果列表中。
+        /// </summary>
+        /// <param name="slot">待判断的材质槽。</param>
+        /// <returns>过滤未启用、允许显示非过滤槽位或槽位命中过滤 Shader 时返回 true。</returns>
+        bool ShouldDisplaySlot(MaterialSlotInfo slot)
+        {
+            return slot != null && TaShaderUsageFilterUtility.ShouldDisplaySlot(slot.Shader, resultFilterShader, showNonFilterShaderSlots);
+        }
+
+        /// <summary>
+        /// 统计单个扫描对象在当前过滤设置下可见的材质槽数量。
+        /// </summary>
+        /// <param name="result">单个扫描对象结果。</param>
+        /// <returns>当前可见材质槽数量。</returns>
+        int CountVisibleSlots(ScanObjectResult result)
+        {
+            return GetVisibleSlots(result).Count();
+        }
+
+        /// <summary>
+        /// 判断当前是否启用了 Shader 结果过滤。
+        /// </summary>
+        bool IsResultFilterEnabled()
+        {
+            return TaShaderUsageFilterUtility.IsFilterEnabled(resultFilterShader);
+        }
+
+        /// <summary>
+        /// 判断单个扫描对象是否命中当前 Shader 过滤。
+        /// </summary>
+        bool ShouldDisplayResult(ScanObjectResult result)
+        {
+            return result != null && TaShaderUsageFilterUtility.ShouldDisplayObject(result.Slots.Select(s => s.Shader), resultFilterShader);
+        }
+
+        /// <summary>
+        /// 统计单个扫描对象内命中过滤 Shader 的槽位数量。
+        /// </summary>
+        int CountMatchingSlots(ScanObjectResult result)
+        {
+            return result != null ? TaShaderUsageFilterUtility.CountMatchingSlots(result.Slots.Select(s => s.Shader), resultFilterShader) : 0;
         }
 
         void ScanUsageResults()
@@ -546,12 +723,40 @@ namespace TA.ArtTools.Editor
             });
         }
 
-        void SelectEditableURPLitShaderMaterials()
+        /// <summary>
+        /// 自动勾选当前过滤 Shader 对应的可编辑材质槽。
+        /// </summary>
+        /// <param name="context">Art Tools 窗口上下文，用于刷新右侧结果视图。</param>
+        void AutoSelectFilterShaderMaterials(ArtToolContext context)
+        {
+            if (!IsResultFilterEnabled())
+            {
+                EditorUtility.DisplayDialog("没有过滤 Shader", "请先指定“结果过滤 Shader”。", "确定");
+                return;
+            }
+
+            if (results.Count == 0)
+                ScanUsageResults();
+
+            SelectEditableFilterShaderMaterials();
+            ShowUsageResults(context, $"已自动勾选使用过滤 Shader 的可编辑材质：{resultFilterShader.name}");
+        }
+
+        /// <summary>
+        /// 根据当前过滤 Shader 勾选可编辑且可安全替换的材质槽。
+        /// </summary>
+        void SelectEditableFilterShaderMaterials()
         {
             foreach (ScanObjectResult result in results)
             {
                 foreach (MaterialSlotInfo slot in result.Slots)
-                    slot.Selected = slot.Editable && !slot.IsPackageDefaultLitMaterial && IsURPLitShader(slot.Shader);
+                {
+                    slot.Selected = TaShaderUsageFilterUtility.ShouldAutoSelectSlot(
+                        slot.Shader,
+                        resultFilterShader,
+                        slot.Editable,
+                        slot.IsPackageDefaultLitMaterial);
+                }
             }
         }
 
@@ -572,8 +777,9 @@ namespace TA.ArtTools.Editor
                 return;
             }
 
-            List<Material> selectedMaterials = results
-                .SelectMany(r => r.Slots)
+            List<ScanObjectResult> visibleResults = GetVisibleResults().ToList();
+            List<Material> selectedMaterials = visibleResults
+                .SelectMany(GetVisibleSlots)
                 .Where(s => s.Selected && s.Editable && !s.IsPackageDefaultLitMaterial && s.Material != null)
                 .Select(s => s.Material)
                 .Distinct()
@@ -581,13 +787,19 @@ namespace TA.ArtTools.Editor
 
             if (selectedMaterials.Count == 0)
             {
-                EditorUtility.DisplayDialog("没有勾选材质", "请先扫描对象并勾选可编辑材质槽。", "确定");
+                string emptySelectionMessage = IsResultFilterEnabled()
+                    ? "当前 Shader 过滤结果中没有已勾选的可编辑材质槽。"
+                    : "请先扫描对象并勾选可编辑材质槽。";
+                EditorUtility.DisplayDialog("没有勾选材质", emptySelectionMessage, "确定");
                 return;
             }
 
+            string filterNotice = IsResultFilterEnabled()
+                ? $"\n\n当前过滤 Shader：{resultFilterShader.name}\n只会替换当前可见结果中的已勾选材质。"
+                : "";
             bool confirm = EditorUtility.DisplayDialog(
                 "替换材质 Shader",
-                $"即将把 {selectedMaterials.Count} 个材质替换为：\n{replaceShader.name}\n\n执行前请确认项目已纳入版本管理。",
+                $"即将把 {selectedMaterials.Count} 个材质替换为：\n{replaceShader.name}{filterNotice}\n\n执行前请确认项目已纳入版本管理。",
                 "替换",
                 "取消");
             if (!confirm)
