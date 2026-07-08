@@ -31,7 +31,10 @@ namespace TA.ArtTools.Editor
         [MenuItem("Tools/TA/Art Tools")]
         public static void Open()
         {
-            GetWindow<TaArtToolsWindow>("TA Art Tools");
+            TaArtToolsWindow window = GetWindow<TaArtToolsWindow>("TA Art Tools");
+            window.minSize = new Vector2(NavigationMinWidth + RightPaneMinWidth, ModulePanelMinHeight + PreviewPanelMinHeight);
+            window.Show();
+            window.Focus();
         }
 
         void OnEnable()
@@ -43,6 +46,7 @@ namespace TA.ArtTools.Editor
             modules.Add(new TaTextureUsageModule());
             modules.Add(new TaShaderUsageModule());
             modules.Add(new TaSimpleLitRefreshModule());
+            modules.Add(new TaAssetCloneIsolationModule());
             modules.Add(new TaDisabledRendererCleanerModule());
         }
 
@@ -142,27 +146,48 @@ namespace TA.ArtTools.Editor
             previewPanel.Add(resultScroll);
 
             moduleButtons.Clear();
-            string lastCategory = "";
-            foreach (IArtToolModule module in modules)
+            foreach (KeyValuePair<string, List<IArtToolModule>> categoryGroup in BuildModuleCategoryGroups())
             {
-                if (!string.Equals(lastCategory, module.Category, StringComparison.Ordinal))
-                {
-                    lastCategory = module.Category;
-                    var category = new Label(lastCategory);
-                    category.style.unityFontStyleAndWeight = FontStyle.Bold;
-                    category.style.marginTop = 8;
-                    nav.Add(category);
-                }
+                var category = new Label(categoryGroup.Key);
+                category.style.unityFontStyleAndWeight = FontStyle.Bold;
+                category.style.marginTop = 8;
+                nav.Add(category);
 
-                IArtToolModule captured = module;
-                var button = new Button(() => SelectModule(captured)) { text = module.DisplayName };
-                button.style.unityTextAlign = TextAnchor.MiddleLeft;
-                button.style.marginBottom = 2;
-                nav.Add(button);
-                moduleButtons.Add(module, button);
+                foreach (IArtToolModule module in categoryGroup.Value)
+                {
+                    IArtToolModule captured = module;
+                    var button = new Button(() => SelectModule(captured)) { text = module.DisplayName };
+                    button.style.unityTextAlign = TextAnchor.MiddleLeft;
+                    button.style.marginBottom = 2;
+                    nav.Add(button);
+                    moduleButtons.Add(module, button);
+                }
             }
 
             SelectModule(modules.Count > 0 ? modules[0] : null);
+        }
+
+        /// <summary>
+        /// Builds navigation groups while preserving the first-seen category order and module order inside each category.
+        /// </summary>
+        List<KeyValuePair<string, List<IArtToolModule>>> BuildModuleCategoryGroups()
+        {
+            var categoryGroups = new List<KeyValuePair<string, List<IArtToolModule>>>();
+
+            foreach (IArtToolModule module in modules)
+            {
+                string categoryName = string.IsNullOrEmpty(module.Category) ? "Tools" : module.Category;
+                int categoryIndex = categoryGroups.FindIndex(pair => string.Equals(pair.Key, categoryName, StringComparison.Ordinal));
+                if (categoryIndex < 0)
+                {
+                    categoryGroups.Add(new KeyValuePair<string, List<IArtToolModule>>(categoryName, new List<IArtToolModule> { module }));
+                    continue;
+                }
+
+                categoryGroups[categoryIndex].Value.Add(module);
+            }
+
+            return categoryGroups;
         }
 
         void SelectModule(IArtToolModule module)
@@ -188,14 +213,28 @@ namespace TA.ArtTools.Editor
                 RequestApply = RunApply,
                 ShowReport = ShowReport,
                 ShowCustomView = ShowCustomView,
+                ShowCustomReportView = ShowCustomReportView,
                 ExportCurrentReport = ExportCurrentReport,
                 Log = SetStatus,
                 CurrentReport = () => currentReport
             };
             moduleScroll.Add(activeModule.CreateView(context));
             RenderHelp(activeModule);
-            SetStatus("已选择：" + activeModule.PanelTitle);
+            SetStatus(GetModuleReadyStatus(activeModule));
             UpdateButtons();
+        }
+
+        /// <summary>
+        /// Returns an informative ready status for the active module without implying that user assets were selected.
+        /// </summary>
+        static string GetModuleReadyStatus(IArtToolModule module)
+        {
+            if (module == null)
+                return "就绪。";
+
+            return string.IsNullOrEmpty(module.Description)
+                ? module.PanelTitle + "：就绪。"
+                : module.Description;
         }
 
         void RunScan()
@@ -250,6 +289,18 @@ namespace TA.ArtTools.Editor
                 resultScroll.Add(view);
 
             SetStatus(string.IsNullOrEmpty(status) ? "就绪。" : status);
+            UpdateButtons();
+        }
+
+        void ShowCustomReportView(ArtToolReport report, VisualElement view, string status)
+        {
+            currentReport = report;
+            resultScroll.Clear();
+            if (view != null)
+                resultScroll.Add(view);
+
+            SetStatus(string.IsNullOrEmpty(status) ? "就绪。" : status);
+            UpdateButtons();
         }
 
         void RunApply()

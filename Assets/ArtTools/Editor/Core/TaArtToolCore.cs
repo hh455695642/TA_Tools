@@ -130,6 +130,7 @@ namespace TA.ArtTools.Editor
         public Action RequestApply;
         public Action<ArtToolReport> ShowReport;
         public Action<VisualElement, string> ShowCustomView;
+        public Action<ArtToolReport, VisualElement, string> ShowCustomReportView;
         public Action ExportCurrentReport;
         public Action<string> Log;
         public Func<ArtToolReport> CurrentReport;
