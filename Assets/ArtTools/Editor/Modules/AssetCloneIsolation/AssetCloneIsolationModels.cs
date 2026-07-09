@@ -36,9 +36,14 @@ namespace AssetCloneIsolation.Editor
         public List<string> SelectedAssetPaths = new List<string>();
 
         /// <summary>
-        /// Source-root dependency paths that the user intentionally keeps shared instead of cloned.
+        /// Dependency paths that the user intentionally keeps shared instead of cloned.
         /// </summary>
         public List<string> ExplicitSharedAssetPaths = new List<string>();
+
+        /// <summary>
+        /// External Assets dependency paths that the user explicitly chooses to clone into the target root.
+        /// </summary>
+        public List<string> ExplicitCloneExternalAssetPaths = new List<string>();
 
         /// <summary>
         /// True when an existing target asset file may be overwritten while preserving its GUID.
@@ -61,6 +66,7 @@ namespace AssetCloneIsolation.Editor
                 TargetRoot = TargetRoot,
                 SelectedAssetPaths = new List<string>(SelectedAssetPaths),
                 ExplicitSharedAssetPaths = new List<string>(ExplicitSharedAssetPaths),
+                ExplicitCloneExternalAssetPaths = new List<string>(ExplicitCloneExternalAssetPaths),
                 OverwriteExistingAssets = OverwriteExistingAssets,
                 RewriteExistingTargetAssets = RewriteExistingTargetAssets
             };
@@ -117,6 +123,16 @@ namespace AssetCloneIsolation.Editor
         /// Asset is allowed to remain shared by built-in rules.
         /// </summary>
         SharedDependency,
+
+        /// <summary>
+        /// External Assets dependency is intentionally left shared by default.
+        /// </summary>
+        ExternalShared,
+
+        /// <summary>
+        /// External Assets dependency will be cloned into the target root external bucket.
+        /// </summary>
+        ExternalClone,
 
         /// <summary>
         /// Asset is an external art dependency that blocks applying the plan.
@@ -280,6 +296,16 @@ namespace AssetCloneIsolation.Editor
         public int ExplicitSharedDependencyCount;
 
         /// <summary>
+        /// Number of external Assets dependencies left shared as visible risks.
+        /// </summary>
+        public int ExternalSharedDependencyCount;
+
+        /// <summary>
+        /// Number of external Assets dependencies explicitly cloned into the target root.
+        /// </summary>
+        public int ExternalCloneDependencyCount;
+
+        /// <summary>
         /// Number of blocking errors in the plan.
         /// </summary>
         public int BlockingErrorCount;
@@ -314,6 +340,8 @@ namespace AssetCloneIsolation.Editor
 
             summary.TargetRewriteFileCount = plan.TargetRewriteRecords.Count;
             summary.ExplicitSharedDependencyCount = plan.ExplicitSharedDependencies.Count;
+            summary.ExternalSharedDependencyCount = plan.ExternalSharedDependencies.Count;
+            summary.ExternalCloneDependencyCount = plan.ExplicitCloneExternalDependencies.Count;
             summary.BlockingErrorCount = plan.Errors.Count;
             summary.WarningCount = plan.Warnings.Count;
             return summary;
@@ -345,6 +373,16 @@ namespace AssetCloneIsolation.Editor
         /// Number of source-root dependencies intentionally kept shared for this root graph.
         /// </summary>
         public int ExplicitSharedDependencyCount;
+
+        /// <summary>
+        /// Number of external Assets dependencies left shared for this root graph.
+        /// </summary>
+        public int ExternalSharedDependencyCount;
+
+        /// <summary>
+        /// Number of external Assets dependencies cloned for this root graph.
+        /// </summary>
+        public int ExternalCloneDependencyCount;
 
         /// <summary>
         /// Number of blocking decisions or errors for this root graph.
@@ -395,6 +433,16 @@ namespace AssetCloneIsolation.Editor
                 if (node.Decision == AssetCloneIsolationDecision.ExplicitShared)
                 {
                     summary.ExplicitSharedDependencyCount++;
+                }
+
+                if (node.Decision == AssetCloneIsolationDecision.ExternalShared)
+                {
+                    summary.ExternalSharedDependencyCount++;
+                }
+
+                if (node.Decision == AssetCloneIsolationDecision.ExternalClone)
+                {
+                    summary.ExternalCloneDependencyCount++;
                 }
 
                 if (node.Decision == AssetCloneIsolationDecision.BlockedExternal
@@ -493,6 +541,11 @@ namespace AssetCloneIsolation.Editor
         /// Number of GUID replacements found for this file.
         /// </summary>
         public int ReplacementCount;
+
+        /// <summary>
+        /// Number of distinct source GUID mappings involved in this file rewrite.
+        /// </summary>
+        public int GuidMappingCount;
     }
 
     /// <summary>
@@ -532,9 +585,19 @@ namespace AssetCloneIsolation.Editor
         public List<string> SharedDependencies = new List<string>();
 
         /// <summary>
-        /// Source-root dependencies intentionally kept shared by user choice.
+        /// Dependencies intentionally kept shared by user choice.
         /// </summary>
         public List<string> ExplicitSharedDependencies = new List<string>();
+
+        /// <summary>
+        /// External Assets dependencies left shared as visible risks by default.
+        /// </summary>
+        public List<string> ExternalSharedDependencies = new List<string>();
+
+        /// <summary>
+        /// External Assets dependencies explicitly cloned into the target root.
+        /// </summary>
+        public List<string> ExplicitCloneExternalDependencies = new List<string>();
 
         /// <summary>
         /// External art dependencies that are blocked by the plan.
@@ -715,8 +778,13 @@ namespace AssetCloneIsolation.Editor
         public bool RewriteExistingTargetAssets = true;
 
         /// <summary>
-        /// Source-root dependency paths intentionally kept shared by this preset.
+        /// Dependency paths intentionally kept shared by this preset.
         /// </summary>
         public List<string> ExplicitSharedAssetPaths = new List<string>();
+
+        /// <summary>
+        /// External Assets dependency paths intentionally cloned by this preset.
+        /// </summary>
+        public List<string> ExplicitCloneExternalAssetPaths = new List<string>();
     }
 }

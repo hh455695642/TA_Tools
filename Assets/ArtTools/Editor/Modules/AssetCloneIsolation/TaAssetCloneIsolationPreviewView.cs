@@ -24,7 +24,7 @@ namespace TA.ArtTools.Editor
             int rootCount = plan == null ? 0 : plan.RootPlans.Count;
             int assetCount = plan == null ? 0 : plan.Assets.Count;
             int guidMapCount = plan == null ? 0 : plan.GuidMap.Count;
-            return $"Root {rootCount} | 克隆 {assetCount} | 新建 {summary.NewTargetAssetCount} | 覆盖已有 {summary.ExistingTargetAssetCount} | GUID 映射 {guidMapCount} | 显式共享 {summary.ExplicitSharedDependencyCount} | TargetRoot 修复 {summary.TargetRewriteFileCount} | 错误 {summary.BlockingErrorCount} | 警告 {summary.WarningCount}";
+            return $"Root {rootCount} | 克隆 {assetCount} | 新建 {summary.NewTargetAssetCount} | 覆盖已有 {summary.ExistingTargetAssetCount} | 外部共享 {summary.ExternalSharedDependencyCount} | 外部迁移 {summary.ExternalCloneDependencyCount} | GUID 映射 {guidMapCount} | 显式共享 {summary.ExplicitSharedDependencyCount} | TargetRoot 修复 {summary.TargetRewriteFileCount} | 错误 {summary.BlockingErrorCount} | 警告 {summary.WarningCount}";
         }
 
         /// <summary>
@@ -33,7 +33,7 @@ namespace TA.ArtTools.Editor
         public static string BuildRootSummary(AssetCloneIsolationRootPlan rootPlan, AssetCloneIsolationPlan plan)
         {
             AssetCloneIsolationRootSummary summary = AssetCloneIsolationRootSummary.FromRootPlan(rootPlan, plan);
-            return $"新建目标 {summary.NewTargetAssetCount} | 覆盖已有目标 {summary.ExistingTargetAssetCount} | TargetRoot 修复 {summary.TargetRewriteFileCount} | 显式共享 {summary.ExplicitSharedDependencyCount} | 阻断 {summary.BlockingIssueCount} | 警告 {summary.WarningCount}";
+            return $"新建目标 {summary.NewTargetAssetCount} | 覆盖已有目标 {summary.ExistingTargetAssetCount} | 外部共享 {summary.ExternalSharedDependencyCount} | 外部迁移 {summary.ExternalCloneDependencyCount} | TargetRoot 修复 {summary.TargetRewriteFileCount} | 显式共享 {summary.ExplicitSharedDependencyCount} | 阻断 {summary.BlockingIssueCount} | 警告 {summary.WarningCount}";
         }
 
         /// <summary>

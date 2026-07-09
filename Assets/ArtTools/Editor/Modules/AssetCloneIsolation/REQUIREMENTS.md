@@ -28,8 +28,8 @@
 - 应用后可审计 `TargetRoot` 的隔离状态。
 - 预览结果必须按每个待克隆隔离对象分组展示，不允许把多个对象的依赖、引用修复和风险混在一个平铺列表中。
 - 每个分组必须展示下游依赖、直接上游引用、共享依赖引用、目标目录修复项、写入清单和风险汇总。
-- 每个分组必须展示摘要：新建目标、覆盖已有目标、TargetRoot 修复、显式共享、阻断和警告。
-- 写入清单必须拆分为新建目标资产、覆盖已有目标并保留 GUID、TargetRoot GUID 修复、显式共享不写入。
+- 每个分组必须展示摘要：新建目标、覆盖已有目标、外部共享、外部迁移、TargetRoot 修复、显式共享、阻断和警告。
+- 写入清单必须拆分为新建目标资产、覆盖已有目标并保留 GUID、外部依赖迁移、TargetRoot GUID 修复、共享风险不写入。
 - 共享依赖引用默认只显示类型统计和前 20 条，路径过滤或选择共享依赖筛选时显示完整匹配。
 - 相关资产必须提供快速定位能力，方便在 Project 面板中手动确认资源关系。
 
@@ -44,13 +44,15 @@
 - 二进制资源本体只复制，不尝试内部重写；如果检测到可疑 `guid:` 文本，需要报告风险。
 - 应用后可扫描 `TargetRoot` 已有文本资源，把指向本次源 GUID 的引用改为目标 GUID。
 - 用户可以把被依赖牵出的 `SourceRoot` 内资源标记为显式共享；显式共享资源不会被复制，也不会进入 GUID 映射。
+- `SourceRoot` 外、`TargetRoot` 外的 `Assets/...` 美术依赖默认作为外部共享风险保留，不阻断应用，也不进入 GUID 映射。
+- 用户可以把外部共享依赖标记为迁移到目标；迁移目标路径固定为 `TargetRoot/_External/Assets/...`。
 - 直接选中的待克隆隔离对象不能被显式共享，必须进入克隆计划。
 - 点击显式共享操作时必须确认风险；显式共享会保留跨目录 GUID 引用，预览和审计必须单独提示风险。
 
 ## 依赖规则
 
 - `SourceRoot` 内非共享依赖会一起克隆。
-- `SourceRoot` 外的 `Assets/...` 美术依赖默认报错，不自动复制。
+- `SourceRoot` 外的 `Assets/...` 美术依赖默认显示为外部共享风险，不自动复制；用户选择迁移后复制到 `TargetRoot/_External/Assets/...`。
 - `TargetRoot` 内依赖允许保留。
 - `Packages/...`、`Library/PackageCache/...`、`ProjectSettings/...`、`Resources/unity_builtin_extra` 允许共享。
 - `.cs`、`.asmdef`、`.asmref`、`.dll` 允许作为共享代码依赖。
@@ -62,8 +64,8 @@
 ## 审计规则
 
 - `TargetRoot` 中不得残留指向 `SourceRoot` 的非共享美术依赖。
-- `TargetRoot` 中不得残留非共享的外部 `Assets/...` 美术依赖。
-- 材质引用 shader 必须来自 `TargetRoot`、Unity/URP/ShaderGraph package、PackageCache 或 built-in。
+- `TargetRoot` 中引用外部 `Assets/...` 美术依赖时给出 warning，说明它是外部共享风险，可选择迁移以彻底隔离。
+- 材质引用 shader 优先来自 `TargetRoot`、Unity/URP/ShaderGraph package、PackageCache 或 built-in；引用 SourceRoot shader 且未显式共享时仍为 error，引用其它外部 `Assets/...` shader 时为 warning。
 - 文本资源中无法解析的 GUID 需要报错。
 - Shader、ShaderGraph、Compute 需要扫描 `multi_compile` 与 `shader_feature`，提示移动端 variant 风险。
 - 重名资源需要提示潜在按名称寻址风险。

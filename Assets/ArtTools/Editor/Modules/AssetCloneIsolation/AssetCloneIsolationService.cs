@@ -46,7 +46,9 @@ namespace AssetCloneIsolation.Editor
             plan.AddInfo("Clone assets: " + plan.Assets.Count);
             plan.AddInfo("Shared dependencies: " + plan.SharedDependencies.Count);
             plan.AddInfo("Explicit shared dependencies: " + plan.ExplicitSharedDependencies.Count);
-            plan.AddInfo("External art dependency errors: " + plan.ExternalArtDependencies.Count);
+            plan.AddInfo("External shared dependencies: " + plan.ExternalSharedDependencies.Count);
+            plan.AddInfo("External clone dependencies: " + plan.ExplicitCloneExternalDependencies.Count);
+            plan.AddInfo("Blocked external art dependencies: " + plan.ExternalArtDependencies.Count);
             plan.AddInfo("Existing target rewrite files: " + plan.TargetRewriteRecords.Count);
             return plan;
         }
@@ -143,7 +145,7 @@ namespace AssetCloneIsolation.Editor
             report.AssetCount = assetPaths.Count;
 
             AuditDependencies(assetPaths, normalizedTargetRoot, normalizedSourceRoot, explicitSharedSet, report);
-            AuditMaterialShaders(assetPaths, normalizedTargetRoot, explicitSharedSet, report);
+            AuditMaterialShaders(assetPaths, normalizedTargetRoot, normalizedSourceRoot, explicitSharedSet, report);
             AuditUnknownGuidReferences(assetPaths, report);
             AuditShaderVariantRisk(assetPaths, report);
             AuditDuplicateFileNames(assetPaths, report);
@@ -183,6 +185,13 @@ namespace AssetCloneIsolation.Editor
                         .Where(path => !string.IsNullOrEmpty(path))
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList(),
+                ExplicitCloneExternalAssetPaths = options.ExplicitCloneExternalAssetPaths == null
+                    ? new List<string>()
+                    : options.ExplicitCloneExternalAssetPaths
+                        .Select(AssetCloneIsolationUtility.NormalizeAssetPath)
+                        .Where(path => !string.IsNullOrEmpty(path))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
                 OverwriteExistingAssets = options.OverwriteExistingAssets,
                 RewriteExistingTargetAssets = options.RewriteExistingTargetAssets
             };
@@ -216,6 +225,14 @@ namespace AssetCloneIsolation.Editor
             if (options.SelectedAssetPaths.Count == 0)
             {
                 plan.AddError("No selected assets were provided.");
+            }
+
+            foreach (string selectedAssetPath in options.SelectedAssetPaths)
+            {
+                if (!AssetCloneIsolationUtility.IsUnderRoot(selectedAssetPath, options.SourceRoot))
+                {
+                    plan.AddError("Selected root asset must be under SourceRoot: " + selectedAssetPath);
+                }
             }
         }
 
@@ -256,6 +273,15 @@ namespace AssetCloneIsolation.Editor
 
                 if (!AssetCloneIsolationUtility.IsUnderRoot(currentPath, options.SourceRoot))
                 {
+                    if (IsExplicitExternalCloneDependency(currentPath, options))
+                    {
+                        AddUnique(plan.ExplicitCloneExternalDependencies, currentPath);
+                        sourceAssets.Add(currentPath);
+                        EnqueueAssetDatabaseDependencies(currentPath, options, plan, pendingPaths);
+                        EnqueueTextGuidDependencies(currentPath, options, plan, pendingPaths);
+                        continue;
+                    }
+
                     HandleExternalDependency(currentPath, options, plan);
                     continue;
                 }
@@ -371,20 +397,27 @@ namespace AssetCloneIsolation.Editor
                 return;
             }
 
+            if (IsExplicitExternalCloneDependency(dependencyPath, options))
+            {
+                AddUnique(plan.ExplicitCloneExternalDependencies, dependencyPath);
+                pendingPaths.Enqueue(dependencyPath);
+                return;
+            }
+
             HandleExternalDependency(dependencyPath, options, plan);
         }
 
         /// <summary>
-        /// Reports a dependency that is not safe to leave shared.
+        /// Reports a dependency that is kept shared by default or is non-Assets shared infrastructure.
         /// </summary>
         static void HandleExternalDependency(string dependencyPath, AssetCloneIsolationOptions options, AssetCloneIsolationPlan plan)
         {
             if (dependencyPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
             {
-                if (!plan.ExternalArtDependencies.Contains(dependencyPath))
+                if (!plan.ExternalSharedDependencies.Contains(dependencyPath, StringComparer.OrdinalIgnoreCase))
                 {
-                    plan.ExternalArtDependencies.Add(dependencyPath);
-                    plan.AddError("External art dependency is outside SourceRoot and TargetRoot: " + dependencyPath);
+                    plan.ExternalSharedDependencies.Add(dependencyPath);
+                    plan.AddWarning("External shared art dependency remains outside SourceRoot and TargetRoot: " + dependencyPath);
                 }
 
                 return;
@@ -410,7 +443,7 @@ namespace AssetCloneIsolation.Editor
                     continue;
                 }
 
-                string targetAssetPath = AssetCloneIsolationUtility.BuildTargetPath(sourceAssetPath, plan.Options.SourceRoot, plan.Options.TargetRoot);
+                string targetAssetPath = AssetCloneIsolationUtility.BuildCloneTargetPath(sourceAssetPath, plan.Options);
                 if (targetPathOwners.ContainsKey(targetAssetPath))
                 {
                     plan.AddError("Target path conflict: " + targetAssetPath + " from " + sourceAssetPath + " and " + targetPathOwners[targetAssetPath]);
@@ -427,6 +460,11 @@ namespace AssetCloneIsolation.Editor
 
                 string targetGuid = ResolveTargetGuid(targetAssetPath, targetAlreadyExists, sourceGuid, plan);
                 plan.GuidMap[sourceGuid] = targetGuid;
+                if (!AssetCloneIsolationUtility.IsUnderRoot(sourceAssetPath, plan.Options.SourceRoot))
+                {
+                    AddUnique(plan.ExplicitCloneExternalDependencies, sourceAssetPath);
+                }
+
                 plan.Assets.Add(new AssetCloneIsolationAssetRecord
                 {
                     SourceAssetPath = sourceAssetPath,
@@ -501,13 +539,15 @@ namespace AssetCloneIsolation.Editor
                     continue;
                 }
 
-                AssetCloneIsolationUtility.RewriteGuidReferences(File.ReadAllText(absolutePath), plan.GuidMap, out int replacementCount);
+                string originalText = File.ReadAllText(absolutePath);
+                AssetCloneIsolationUtility.RewriteGuidReferences(originalText, plan.GuidMap, out int replacementCount);
                 if (replacementCount > 0)
                 {
                     plan.TargetRewriteRecords.Add(new AssetCloneIsolationRewriteRecord
                     {
                         AssetPath = assetPath,
-                        ReplacementCount = replacementCount
+                        ReplacementCount = replacementCount,
+                        GuidMappingCount = CountMappedGuidReferences(originalText, plan)
                     });
                 }
             }
@@ -601,7 +641,8 @@ namespace AssetCloneIsolation.Editor
                     pending.Value);
                 rootPlan.DownstreamDependencies.Add(node);
 
-                if (node.Decision != AssetCloneIsolationDecision.Clone)
+                if (node.Decision != AssetCloneIsolationDecision.Clone
+                    && node.Decision != AssetCloneIsolationDecision.ExternalClone)
                 {
                     continue;
                 }
@@ -731,6 +772,10 @@ namespace AssetCloneIsolation.Editor
             {
                 targetPath = AssetCloneIsolationUtility.BuildTargetPath(normalizedPath, plan.Options.SourceRoot, plan.Options.TargetRoot);
             }
+            else if (IsExplicitExternalCloneDependency(normalizedPath, plan.Options))
+            {
+                targetPath = AssetCloneIsolationUtility.BuildExternalTargetPath(normalizedPath, plan.Options.TargetRoot);
+            }
             else if (AssetCloneIsolationUtility.IsUnderRoot(normalizedPath, plan.Options.TargetRoot))
             {
                 targetPath = normalizedPath;
@@ -783,8 +828,13 @@ namespace AssetCloneIsolation.Editor
                 return AssetCloneIsolationDecision.SharedDependency;
             }
 
+            if (IsExplicitExternalCloneDependency(normalizedPath, plan.Options))
+            {
+                return AssetCloneIsolationDecision.ExternalClone;
+            }
+
             return normalizedPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
-                ? AssetCloneIsolationDecision.BlockedExternal
+                ? AssetCloneIsolationDecision.ExternalShared
                 : AssetCloneIsolationDecision.SharedDependency;
         }
 
@@ -796,9 +846,13 @@ namespace AssetCloneIsolation.Editor
             switch (decision)
             {
                 case AssetCloneIsolationDecision.Clone:
-                    return "Clone to " + AssetCloneIsolationUtility.BuildTargetPath(assetPath, plan.Options.SourceRoot, plan.Options.TargetRoot);
+                    return "Clone to " + AssetCloneIsolationUtility.BuildCloneTargetPath(assetPath, plan.Options);
                 case AssetCloneIsolationDecision.ExplicitShared:
-                    return "Explicit shared SourceRoot dependency; target assets keep the source GUID.";
+                    return "Explicit shared dependency; target assets keep the source GUID.";
+                case AssetCloneIsolationDecision.ExternalShared:
+                    return "External Assets dependency stays shared by default; migrate it to fully isolate.";
+                case AssetCloneIsolationDecision.ExternalClone:
+                    return "External Assets dependency clones to " + AssetCloneIsolationUtility.BuildExternalTargetPath(assetPath, plan.Options.TargetRoot);
                 case AssetCloneIsolationDecision.SharedDependency:
                     return "Allowed shared dependency.";
                 case AssetCloneIsolationDecision.BlockedExternal:
@@ -996,7 +1050,8 @@ namespace AssetCloneIsolation.Editor
                     plan.TargetRewriteRecords.Add(new AssetCloneIsolationRewriteRecord
                     {
                         AssetPath = assetPath,
-                        ReplacementCount = replacementCount
+                        ReplacementCount = replacementCount,
+                        GuidMappingCount = CountMappedGuidReferences(originalText, plan)
                     });
                 }
             }
@@ -1041,7 +1096,7 @@ namespace AssetCloneIsolation.Editor
 
                     if (dependencyPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
                     {
-                        report.AddError("Target asset has non-shared external art dependency: " + assetPath + " -> " + dependencyPath);
+                        report.AddWarning("Target asset keeps external shared art dependency risk; migrate it to fully isolate: " + assetPath + " -> " + dependencyPath);
                     }
                 }
             }
@@ -1053,6 +1108,7 @@ namespace AssetCloneIsolation.Editor
         static void AuditMaterialShaders(
             IReadOnlyList<string> assetPaths,
             string targetRoot,
+            string sourceRoot,
             IReadOnlyCollection<string> explicitSharedAssetPaths,
             AssetCloneIsolationAuditReport report)
         {
@@ -1070,7 +1126,19 @@ namespace AssetCloneIsolation.Editor
                 {
                     if (explicitSharedAssetPaths != null && explicitSharedAssetPaths.Contains(shaderPath))
                     {
-                        report.AddWarning("Material uses explicitly shared source shader: " + assetPath + " -> " + shaderPath);
+                        report.AddWarning("Material uses explicitly shared shader: " + assetPath + " -> " + shaderPath);
+                        continue;
+                    }
+
+                    if (AssetCloneIsolationUtility.IsUnderRoot(shaderPath, sourceRoot))
+                    {
+                        report.AddError("Material uses non-isolated source shader: " + assetPath + " -> " + shaderPath);
+                        continue;
+                    }
+
+                    if (shaderPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        report.AddWarning("Material uses external shared shader risk: " + assetPath + " -> " + shaderPath);
                         continue;
                     }
 
@@ -1189,14 +1257,28 @@ namespace AssetCloneIsolation.Editor
         /// </summary>
         static void AddUnique(List<string> list, string value)
         {
-            if (!list.Contains(value))
+            if (!list.Contains(value, StringComparer.OrdinalIgnoreCase))
             {
                 list.Add(value);
             }
         }
 
         /// <summary>
-        /// Returns true when the dependency is configured as an explicit shared source-root asset.
+        /// Counts the distinct GUID mappings present in one text file.
+        /// </summary>
+        static int CountMappedGuidReferences(string sourceText, AssetCloneIsolationPlan plan)
+        {
+            if (plan == null || plan.GuidMap.Count == 0)
+            {
+                return 0;
+            }
+
+            return AssetCloneIsolationUtility.ExtractGuidReferences(sourceText)
+                .Count(guid => plan.GuidMap.ContainsKey(guid));
+        }
+
+        /// <summary>
+        /// Returns true when the dependency is configured as an explicit shared asset.
         /// </summary>
         static bool IsExplicitSharedDependency(string assetPath, AssetCloneIsolationOptions options)
         {
@@ -1207,6 +1289,23 @@ namespace AssetCloneIsolation.Editor
 
             string normalizedPath = AssetCloneIsolationUtility.NormalizeAssetPath(assetPath);
             return options.ExplicitSharedAssetPaths.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Returns true when an external Assets dependency should be cloned into the target external bucket.
+        /// </summary>
+        static bool IsExplicitExternalCloneDependency(string assetPath, AssetCloneIsolationOptions options)
+        {
+            if (options == null || options.ExplicitCloneExternalAssetPaths == null)
+            {
+                return false;
+            }
+
+            string normalizedPath = AssetCloneIsolationUtility.NormalizeAssetPath(assetPath);
+            return normalizedPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
+                   && !AssetCloneIsolationUtility.IsUnderRoot(normalizedPath, options.SourceRoot)
+                   && !AssetCloneIsolationUtility.IsUnderRoot(normalizedPath, options.TargetRoot)
+                   && options.ExplicitCloneExternalAssetPaths.Contains(normalizedPath, StringComparer.OrdinalIgnoreCase);
         }
 
         /// <summary>

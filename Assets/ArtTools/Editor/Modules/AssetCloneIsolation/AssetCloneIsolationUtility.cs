@@ -117,6 +117,40 @@ namespace AssetCloneIsolation.Editor
         }
 
         /// <summary>
+        /// Builds the target path for an external Assets dependency cloned into the target root.
+        /// </summary>
+        public static string BuildExternalTargetPath(string assetPath, string targetRoot)
+        {
+            string normalizedAssetPath = NormalizeAssetPath(assetPath);
+            string normalizedTargetRoot = NormalizeAssetPath(targetRoot);
+            if (!normalizedAssetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException("External clone asset must start with Assets/: " + normalizedAssetPath);
+            }
+
+            return NormalizeAssetPath(normalizedTargetRoot + "/_External/" + normalizedAssetPath);
+        }
+
+        /// <summary>
+        /// Builds the clone target path for a source-root asset or an explicitly cloned external dependency.
+        /// </summary>
+        public static string BuildCloneTargetPath(string assetPath, AssetCloneIsolationOptions options)
+        {
+            if (options == null)
+            {
+                throw new ArgumentNullException("options");
+            }
+
+            string normalizedAssetPath = NormalizeAssetPath(assetPath);
+            if (IsUnderRoot(normalizedAssetPath, options.SourceRoot))
+            {
+                return BuildTargetPath(normalizedAssetPath, options.SourceRoot, options.TargetRoot);
+            }
+
+            return BuildExternalTargetPath(normalizedAssetPath, options.TargetRoot);
+        }
+
+        /// <summary>
         /// Returns true when the asset is safe to rewrite as UTF-8 text.
         /// </summary>
         public static bool IsTextAssetPath(string assetPath)
