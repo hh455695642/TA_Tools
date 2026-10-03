@@ -54,6 +54,21 @@ namespace TA.ArtTools.Editor
         /// Optional preset used to load and save common root settings.
         /// </summary>
         AssetCloneIsolationPreset preset;
+        ArtToolContext activeContext;
+        readonly IsolationPreviewState previewState = new IsolationPreviewState();
+        TaAssetCloneIsolationPreviewWorkspace previewWorkspace;
+        ArtToolReport previewReport;
+        AssetCloneIsolationOptions previewOptions;
+        int configurationVersion;
+        int previewVersion = -1;
+        bool consumed;
+        Button applyButton;
+        TextField sourceRootField;
+        TextField targetRootField;
+        Toggle overwriteToggle;
+        Toggle rewriteToggle;
+        Label sharedCountLabel;
+        Label externalCountLabel;
 
         /// <summary>
         /// Display name shown in the TA Art Tools navigation.
@@ -83,8 +98,8 @@ namespace TA.ArtTools.Editor
             + "推荐流程：\n"
             + "1. 设置 SourceRoot 和 TargetRoot。\n"
             + "2. 拖入 Project 资源、文件夹、材质、贴图、Shader、Prefab，或拖入 Hierarchy 中的 Prefab 实例。\n"
-            + "3. 点击“预览计划”，在下方按每个待克隆对象查看下游依赖、直接上游、共享依赖引用、TargetRoot 修复项和风险。\n"
-            + "4. 如确实希望某个 SourceRoot 依赖留在原地，可在关系视图中切换为“显式共享”。SourceRoot 外的公共 Assets 依赖默认留在原地并显示风险，可按需点“迁移到目标”。\n"
+            + "3. 点击“预览计划”，先核对去重后的写入清单，再切换“依赖处理”和“问题与风险”。选择一行查看完整路径、GUID 和所属对象的引用关系。\n"
+            + "4. 在依赖页使用 Ctrl / Shift 多选，可批量选择“留在原地”或“迁移到目标”；显式共享会保留对 SourceRoot 的引用。\n"
             + "5. 只有预览没有阻断错误时才点击“应用计划”。\n"
             + "6. 应用后点击“审计 TargetRoot”，确认目标目录没有非预期旧项目美术依赖。\n\n"
             + "规则：直接上游只表示直接引用待克隆对象本身的资产；共享依赖引用只表示共用 Shader/贴图等下游依赖。SourceRoot 内依赖默认一起克隆；SourceRoot 外的 Assets 美术依赖默认作为外部共享风险保留，可选择迁移到 TargetRoot/_External/Assets；Packages、Unity built-in、脚本和程序集依赖保持共享。"
@@ -95,14 +110,20 @@ namespace TA.ArtTools.Editor
         /// </summary>
         public override VisualElement CreateView(ArtToolContext context)
         {
+            activeContext = context;
+            previewWorkspace = null;
+            previewReport = null;
+            previewVersion = -1;
             var root = new VisualElement();
             root.Add(Header(PanelTitle, Description));
             root.Add(CreateIntroHelpBox());
             root.Add(CreateConfigurationView());
             root.Add(CreateTargetPickerView(context));
+            applyButton = ActionButton("应用计划", () => context.RequestApply?.Invoke());
+            applyButton.SetEnabled(false);
             root.Add(ActionRow(
                 ActionButton("预览计划", () => ShowPlanPreview(context)),
-                ActionButton("应用计划", () => context.RequestApply?.Invoke()),
+                applyButton,
                 ActionButton("审计 TargetRoot", () => ShowAuditReport(context)),
                 ActionButton("导出 CSV", () => context.ExportCurrentReport?.Invoke())));
             return root;
@@ -117,13 +138,59 @@ namespace TA.ArtTools.Editor
             return BuildPlanReport(plan);
         }
 
+        public override void Apply(ArtToolReport report)
+        {
+            if (!CanApplyPreview(report))
+                throw new InvalidOperationException("计划已过期或不可应用，请重新预览。");
+            base.Apply(report);
+        }
+
+        internal bool CanApplyPreview(ArtToolReport report)
+        {
+            return report != null && ReferenceEquals(report, previewReport) && report.WriteCount > 0
+                && !report.HasErrors && !consumed && previewVersion == configurationVersion
+                && (activeContext?.CurrentReport == null || ReferenceEquals(activeContext.CurrentReport(), report))
+                && OptionsMatch(previewOptions, CreateOptions());
+        }
+
+        static bool OptionsMatch(AssetCloneIsolationOptions left, AssetCloneIsolationOptions right)
+        {
+            if (left == null || right == null) return false;
+            return left.SourceRoot == right.SourceRoot && left.TargetRoot == right.TargetRoot
+                && left.OverwriteExistingAssets == right.OverwriteExistingAssets
+                && left.RewriteExistingTargetAssets == right.RewriteExistingTargetAssets
+                && left.SelectedAssetPaths.SequenceEqual(right.SelectedAssetPaths, StringComparer.OrdinalIgnoreCase)
+                && left.ExplicitSharedAssetPaths.SequenceEqual(right.ExplicitSharedAssetPaths, StringComparer.OrdinalIgnoreCase)
+                && left.ExplicitCloneExternalAssetPaths.SequenceEqual(right.ExplicitCloneExternalAssetPaths, StringComparer.OrdinalIgnoreCase);
+        }
+
+        void MarkPlanDirty()
+        {
+            configurationVersion++;
+            applyButton?.SetEnabled(false);
+            RefreshConfigurationFields();
+            if (previewReport == null) return;
+            previewWorkspace?.SetUnavailable("计划已过期：配置或待克隆对象已变化，请重新预览。");
+            activeContext?.InvalidateCurrentReport?.Invoke("计划已过期，请重新预览。");
+        }
+
+        void RefreshConfigurationFields()
+        {
+            sourceRootField?.SetValueWithoutNotify(sourceRoot);
+            targetRootField?.SetValueWithoutNotify(targetRoot);
+            overwriteToggle?.SetValueWithoutNotify(overwriteExistingAssets);
+            rewriteToggle?.SetValueWithoutNotify(rewriteExistingTargetAssets);
+            if (sharedCountLabel != null) sharedCountLabel.text = "显式共享依赖：" + explicitSharedPaths.Count;
+            if (externalCountLabel != null) externalCountLabel.text = "外部依赖迁移：" + explicitCloneExternalPaths.Count;
+        }
+
         /// <summary>
         /// Creates the top workflow summary box.
         /// </summary>
         static HelpBox CreateIntroHelpBox()
         {
             return new HelpBox(
-                "先拖入待克隆隔离对象，再预览和应用。下方结果会按每个待克隆对象分组显示下游依赖、直接上游和共享依赖引用；文件夹会在构建计划时递归展开。",
+                "拖入资源后预览：先核对写入计划，再检查依赖和风险。文件夹会递归展开；配置变化后需要重新预览。",
                 HelpBoxMessageType.Info);
         }
 
@@ -134,30 +201,32 @@ namespace TA.ArtTools.Editor
         {
             var root = new VisualElement();
 
-            var sourceRootField = new TextField("SourceRoot") { value = sourceRoot };
-            sourceRootField.RegisterValueChangedCallback(evt => sourceRoot = evt.newValue);
+            sourceRootField = new TextField("SourceRoot") { value = sourceRoot };
+            sourceRootField.RegisterValueChangedCallback(evt => { sourceRoot = evt.newValue; MarkPlanDirty(); });
             root.Add(sourceRootField);
 
-            var targetRootField = new TextField("TargetRoot") { value = targetRoot };
-            targetRootField.RegisterValueChangedCallback(evt => targetRoot = evt.newValue);
+            targetRootField = new TextField("TargetRoot") { value = targetRoot };
+            targetRootField.RegisterValueChangedCallback(evt => { targetRoot = evt.newValue; MarkPlanDirty(); });
             root.Add(targetRootField);
 
-            var overwriteToggle = new Toggle("允许覆盖已有目标文件，但保留目标 GUID") { value = overwriteExistingAssets };
-            overwriteToggle.RegisterValueChangedCallback(evt => overwriteExistingAssets = evt.newValue);
+            overwriteToggle = new Toggle("允许覆盖已有目标文件，但保留目标 GUID") { value = overwriteExistingAssets };
+            overwriteToggle.RegisterValueChangedCallback(evt => { overwriteExistingAssets = evt.newValue; MarkPlanDirty(); });
             root.Add(overwriteToggle);
 
-            var rewriteToggle = new Toggle("应用后修复 TargetRoot 已有旧 GUID 引用") { value = rewriteExistingTargetAssets };
-            rewriteToggle.RegisterValueChangedCallback(evt => rewriteExistingTargetAssets = evt.newValue);
+            rewriteToggle = new Toggle("应用后修复 TargetRoot 已有旧 GUID 引用") { value = rewriteExistingTargetAssets };
+            rewriteToggle.RegisterValueChangedCallback(evt => { rewriteExistingTargetAssets = evt.newValue; MarkPlanDirty(); });
             root.Add(rewriteToggle);
 
             var explicitSharedRow = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center } };
-            explicitSharedRow.Add(new Label("显式共享依赖：" + explicitSharedPaths.Count) { style = { flexGrow = 1 } });
-            explicitSharedRow.Add(ActionButton("清空显式共享", () => explicitSharedPaths.Clear()));
+            sharedCountLabel = new Label("显式共享依赖：" + explicitSharedPaths.Count) { style = { flexGrow = 1 } };
+            explicitSharedRow.Add(sharedCountLabel);
+            explicitSharedRow.Add(ActionButton("清空显式共享", () => { explicitSharedPaths.Clear(); MarkPlanDirty(); }));
             root.Add(explicitSharedRow);
 
             var externalCloneRow = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center } };
-            externalCloneRow.Add(new Label("外部依赖迁移：" + explicitCloneExternalPaths.Count) { style = { flexGrow = 1 } });
-            externalCloneRow.Add(ActionButton("清空外部迁移", () => explicitCloneExternalPaths.Clear()));
+            externalCountLabel = new Label("外部依赖迁移：" + explicitCloneExternalPaths.Count) { style = { flexGrow = 1 } };
+            externalCloneRow.Add(externalCountLabel);
+            externalCloneRow.Add(ActionButton("清空外部迁移", () => { explicitCloneExternalPaths.Clear(); MarkPlanDirty(); }));
             root.Add(externalCloneRow);
 
             root.Add(CreatePresetView());
@@ -226,7 +295,9 @@ namespace TA.ArtTools.Editor
                         if (resolved != null)
                         {
                             targets[rowIndex] = resolved;
+                            MarkPlanDirty();
                         }
+                        else if (evt.newValue == null) { targets.RemoveAt(rowIndex); MarkPlanDirty(); }
 
                         refreshTargetList();
                     });
@@ -234,6 +305,7 @@ namespace TA.ArtTools.Editor
                     row.Add(ActionButton("移除", () =>
                     {
                         targets.RemoveAt(rowIndex);
+                        MarkPlanDirty();
                         refreshTargetList();
                     }));
                     targetList.Add(row);
@@ -248,6 +320,7 @@ namespace TA.ArtTools.Editor
             root.Add(ActionRow(ActionButton("清空对象", () =>
             {
                 targets.Clear();
+                MarkPlanDirty();
                 refreshTargetList();
             })));
 
@@ -339,6 +412,7 @@ namespace TA.ArtTools.Editor
                 {
                     targets.Add(projectObject);
                     selectedPaths.Add(assetPath);
+                    MarkPlanDirty();
                 }
             }
         }
@@ -367,9 +441,17 @@ namespace TA.ArtTools.Editor
         {
             AssetCloneIsolationPlan plan = AssetCloneIsolationService.BuildPlan(CreateOptions());
             ArtToolReport report = BuildPlanReport(plan);
-            VisualElement view = BuildRelationshipPreviewView(plan, context);
+            if (previewWorkspace == null)
+                previewWorkspace = new TaAssetCloneIsolationPreviewWorkspace(previewState, ChangeDependencyDecisions,
+                    () => ShowPlanPreview(context), () => ShowAuditReport(context), () => context.RequestApply?.Invoke());
+            previewWorkspace.SetPlan(plan);
+            VisualElement view = previewWorkspace;
             string status = BuildPreviewStatus(plan, report);
-            if (context.ShowCustomReportView != null)
+            if (context.ShowCustomReportWorkspace != null)
+            {
+                context.ShowCustomReportWorkspace.Invoke(report, view, status);
+            }
+            else if (context.ShowCustomReportView != null)
             {
                 context.ShowCustomReportView.Invoke(report, view, status);
             }
@@ -377,358 +459,35 @@ namespace TA.ArtTools.Editor
             {
                 context.ShowReport?.Invoke(report);
             }
+            applyButton?.SetEnabled(CanApplyPreview(report));
         }
 
-        /// <summary>
-        /// Builds the bottom relationship preview view.
-        /// </summary>
-        VisualElement BuildRelationshipPreviewView(AssetCloneIsolationPlan plan, ArtToolContext context)
+        void ChangeDependencyDecisions(IReadOnlyList<IsolationPreviewRow> rows, IsolationDependencyAction action)
         {
-            var root = new VisualElement { style = { flexGrow = 1 } };
-            root.Add(WrapLabel(TaAssetCloneIsolationPreviewView.BuildPlanSummary(plan), true));
-
-            string pathFilter = string.Empty;
-            bool riskOnly = false;
-            var decisionChoices = new List<string> { "全部", "克隆", "外部共享", "外部迁移", "显式共享", "共享", "阻断", "目标目录", "直接上游", "共享依赖引用" };
-            string decisionFilter = decisionChoices[0];
-
-            var filterRow = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center, marginBottom = 6 } };
-            var pathField = new TextField("路径过滤") { value = pathFilter };
-            pathField.style.flexGrow = 1;
-            var decisionField = new PopupField<string>("决策", decisionChoices, 0);
-            decisionField.style.width = 190;
-            var riskToggle = new Toggle("只看风险") { value = riskOnly };
-            filterRow.Add(pathField);
-            filterRow.Add(decisionField);
-            filterRow.Add(riskToggle);
-            root.Add(filterRow);
-
-            var content = new VisualElement();
-            root.Add(content);
-
-            Action rebuildContent = () =>
-            {
-                content.Clear();
-                if (plan.RootPlans.Count == 0)
-                {
-                    content.Add(WrapLabel("没有可展示的关系数据。请先把 Project 资源/文件夹或 Hierarchy Prefab 实例拖入上方待克隆隔离资产列表。"));
-                    return;
-                }
-
-                foreach (AssetCloneIsolationRootPlan rootPlan in plan.RootPlans)
-                {
-                    content.Add(BuildRootPlanFoldout(rootPlan, plan, context, pathFilter, decisionFilter, riskOnly));
-                }
-            };
-
-            pathField.RegisterValueChangedCallback(evt =>
-            {
-                pathFilter = evt.newValue ?? string.Empty;
-                rebuildContent();
-            });
-            decisionField.RegisterValueChangedCallback(evt =>
-            {
-                decisionFilter = evt.newValue;
-                rebuildContent();
-            });
-            riskToggle.RegisterValueChangedCallback(evt =>
-            {
-                riskOnly = evt.newValue;
-                rebuildContent();
-            });
-            rebuildContent();
-            return root;
+            if (previewReport == null || consumed || previewVersion != configurationVersion) return;
+            List<string> paths = rows.Where(row => row.Supports(action)).Select(row => row.SourcePath)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (paths.Count == 0) return;
+            if (action == IsolationDependencyAction.Share && !EditorUtility.DisplayDialog("确认显式共享依赖",
+                $"{paths.Count} 个资源将留在原地，不会克隆。目标资源会继续引用 SourceRoot 中的原资源。\n\n"
+                + string.Join("\n", paths.Take(8)) + (paths.Count > 8 ? "\n…" : ""), "留在原地", "取消")) return;
+            SetDependencyPaths(paths, action);
+            MarkPlanDirty();
+            ShowPlanPreview(activeContext);
         }
 
-        /// <summary>
-        /// Builds one selected-root foldout in the relationship preview.
-        /// </summary>
-        VisualElement BuildRootPlanFoldout(
-            AssetCloneIsolationRootPlan rootPlan,
-            AssetCloneIsolationPlan plan,
-            ArtToolContext context,
-            string pathFilter,
-            string decisionFilter,
-            bool riskOnly)
+        internal void SetDependencyPaths(IEnumerable<string> paths, IsolationDependencyAction action)
         {
-            var foldout = new Foldout
+            List<string> chosen = action == IsolationDependencyAction.Share || action == IsolationDependencyAction.FollowClone
+                ? explicitSharedPaths : explicitCloneExternalPaths;
+            bool add = action == IsolationDependencyAction.Share || action == IsolationDependencyAction.MigrateExternal;
+            foreach (string path in paths)
             {
-                text = BuildRootTitle(rootPlan),
-                value = true
-            };
-
-            foldout.Add(BuildAssetPathRow(rootPlan.RootAssetPath, rootPlan.TargetAssetPath, true));
-            foldout.Add(WrapLabel(TaAssetCloneIsolationPreviewView.BuildRootSummary(rootPlan, plan), true));
-            AddNodeSection(foldout, "下游依赖", rootPlan.DownstreamDependencies, plan, context, pathFilter, decisionFilter, riskOnly, rootPlan);
-            AddNodeSection(foldout, "直接上游引用", rootPlan.UpstreamReferences, plan, context, pathFilter, decisionFilter, riskOnly, rootPlan);
-            AddSharedDependencyReferenceSection(foldout, rootPlan, plan, context, pathFilter, decisionFilter, riskOnly);
-            AddRiskSection(foldout, rootPlan, pathFilter);
-            AddWriteSection(foldout, rootPlan, plan, pathFilter, riskOnly);
-            return foldout;
-        }
-
-        /// <summary>
-        /// Adds a relation-node section to a root foldout.
-        /// </summary>
-        void AddNodeSection(
-            VisualElement parent,
-            string title,
-            IReadOnlyList<AssetCloneIsolationRelationNode> nodes,
-            AssetCloneIsolationPlan plan,
-            ArtToolContext context,
-            string pathFilter,
-            string decisionFilter,
-            bool riskOnly,
-            AssetCloneIsolationRootPlan rootPlan)
-        {
-            List<AssetCloneIsolationRelationNode> visibleNodes = nodes
-                .Where(node => NodePassesFilter(node, pathFilter, decisionFilter, riskOnly))
-                .ToList();
-            parent.Add(SectionLabel(title + " (" + visibleNodes.Count + "/" + nodes.Count + ")"));
-            if (visibleNodes.Count == 0)
-            {
-                parent.Add(WrapLabel("无匹配项。"));
-                return;
+                int index = chosen.FindIndex(value => value.Equals(path, StringComparison.OrdinalIgnoreCase));
+                if (add && index < 0) chosen.Add(path);
+                else if (!add && index >= 0) chosen.RemoveAt(index);
             }
-
-            foreach (AssetCloneIsolationRelationNode node in visibleNodes)
-            {
-                parent.Add(BuildRelationNodeRow(node, plan, context, rootPlan));
-            }
-        }
-
-        /// <summary>
-        /// Adds a folded section for assets that only share downstream dependencies with the root.
-        /// </summary>
-        void AddSharedDependencyReferenceSection(
-            VisualElement parent,
-            AssetCloneIsolationRootPlan rootPlan,
-            AssetCloneIsolationPlan plan,
-            ArtToolContext context,
-            string pathFilter,
-            string decisionFilter,
-            bool riskOnly)
-        {
-            List<AssetCloneIsolationRelationNode> visibleNodes = rootPlan.SharedDependencyReferences
-                .Where(node => NodePassesFilter(node, pathFilter, decisionFilter, riskOnly))
-                .ToList();
-            var foldout = new Foldout
-            {
-                text = "共享依赖引用 (" + visibleNodes.Count + "/" + rootPlan.SharedDependencyReferences.Count + ")",
-                value = decisionFilter == "共享依赖引用" || !string.IsNullOrEmpty(pathFilter)
-            };
-            foldout.Add(WrapLabel("这些资产只引用了当前对象的下游依赖，例如 Shader 或贴图；它们不等于直接引用当前资产。"));
-            foldout.Add(WrapLabel(TaAssetCloneIsolationPreviewView.BuildSharedDependencyTypeSummary(visibleNodes)));
-            if (visibleNodes.Count == 0)
-            {
-                foldout.Add(WrapLabel("无匹配项。"));
-            }
-
-            bool showAllRows = TaAssetCloneIsolationPreviewView.ShouldShowAllSharedDependencyRows(pathFilter, decisionFilter);
-            List<AssetCloneIsolationRelationNode> displayedNodes = showAllRows
-                ? visibleNodes
-                : visibleNodes.Take(TaAssetCloneIsolationPreviewView.SharedDependencyPreviewLimit).ToList();
-            if (!showAllRows && visibleNodes.Count > displayedNodes.Count)
-            {
-                foldout.Add(WrapLabel("默认仅显示前 " + displayedNodes.Count + " 条。使用路径过滤或选择“共享依赖引用”筛选可查看全部匹配项。"));
-            }
-
-            foreach (AssetCloneIsolationRelationNode node in displayedNodes)
-            {
-                foldout.Add(BuildRelationNodeRow(node, plan, context, rootPlan));
-            }
-
-            parent.Add(foldout);
-        }
-
-        /// <summary>
-        /// Adds root-local risks derived from downstream decisions.
-        /// </summary>
-        static void AddRiskSection(VisualElement parent, AssetCloneIsolationRootPlan rootPlan, string pathFilter)
-        {
-            List<AssetCloneIsolationRelationNode> riskNodes = rootPlan.DownstreamDependencies
-                .Where(node => IsRiskDecision(node.Decision) && PathPassesFilter(node.AssetPath, pathFilter))
-                .ToList();
-            parent.Add(SectionLabel("问题与风险 (" + riskNodes.Count + ")"));
-            foreach (AssetCloneIsolationRelationNode node in riskNodes)
-            {
-                parent.Add(WrapLabel(DecisionText(node.Decision) + " | " + node.AssetPath + " | " + node.Detail));
-            }
-        }
-
-        /// <summary>
-        /// Adds root-local write records derived from the flat plan.
-        /// </summary>
-        static void AddWriteSection(VisualElement parent, AssetCloneIsolationRootPlan rootPlan, AssetCloneIsolationPlan plan, string pathFilter, bool riskOnly)
-        {
-            if (riskOnly)
-            {
-                return;
-            }
-
-            HashSet<string> rootGraphPaths = BuildRootGraphPathSet(rootPlan);
-            List<AssetCloneIsolationAssetRecord> visibleRecords = plan.Assets
-                .Where(record => rootGraphPaths.Contains(record.SourceAssetPath) && PathPassesFilter(record.SourceAssetPath, pathFilter))
-                .ToList();
-            parent.Add(SectionLabel("写入清单 (" + visibleRecords.Count + ")"));
-            AddAssetRecordWriteGroup(parent, "新建目标资产", visibleRecords.Where(record =>
-                AssetCloneIsolationUtility.IsUnderRoot(record.SourceAssetPath, plan.Options.SourceRoot)
-                && !record.TargetAlreadyExists));
-            AddAssetRecordWriteGroup(parent, "覆盖已有目标并保留 GUID", visibleRecords.Where(record =>
-                AssetCloneIsolationUtility.IsUnderRoot(record.SourceAssetPath, plan.Options.SourceRoot)
-                && record.TargetAlreadyExists));
-            AddAssetRecordWriteGroup(parent, "外部依赖迁移", visibleRecords.Where(record =>
-                !AssetCloneIsolationUtility.IsUnderRoot(record.SourceAssetPath, plan.Options.SourceRoot)));
-            AddRewriteWriteGroup(parent, "TargetRoot GUID 修复", rootPlan.TargetRewriteRecords.Where(record => PathPassesFilter(record.AssetPath, pathFilter)));
-            AddSharedRiskWriteGroup(parent, "共享风险，不写入", rootPlan.DownstreamDependencies
-                .Where(node => (node.Decision == AssetCloneIsolationDecision.ExplicitShared
-                                || node.Decision == AssetCloneIsolationDecision.ExternalShared)
-                               && PathPassesFilter(node.AssetPath, pathFilter)));
-        }
-
-        /// <summary>
-        /// Adds a grouped list of clone write records.
-        /// </summary>
-        static void AddAssetRecordWriteGroup(VisualElement parent, string title, IEnumerable<AssetCloneIsolationAssetRecord> records)
-        {
-            List<AssetCloneIsolationAssetRecord> recordList = records.ToList();
-            parent.Add(SectionLabel(title + " (" + recordList.Count + ")"));
-            if (recordList.Count == 0)
-            {
-                parent.Add(WrapLabel("无。"));
-                return;
-            }
-
-            foreach (AssetCloneIsolationAssetRecord record in recordList)
-            {
-                string actionText = record.TargetAlreadyExists ? "覆盖内容，保留目标 GUID" : "创建新目标资产";
-                parent.Add(WrapLabel(record.SourceAssetPath + " -> " + record.TargetAssetPath
-                                     + " | " + record.SourceGuid + " -> " + record.TargetGuid
-                                     + " | " + actionText));
-            }
-        }
-
-        /// <summary>
-        /// Adds a grouped list of existing target-root GUID rewrite records.
-        /// </summary>
-        static void AddRewriteWriteGroup(VisualElement parent, string title, IEnumerable<AssetCloneIsolationRewriteRecord> records)
-        {
-            List<AssetCloneIsolationRewriteRecord> recordList = records.ToList();
-            parent.Add(SectionLabel(title + " (" + recordList.Count + ")"));
-            if (recordList.Count == 0)
-            {
-                parent.Add(WrapLabel("无。"));
-                return;
-            }
-
-            foreach (AssetCloneIsolationRewriteRecord record in recordList)
-            {
-                parent.Add(BuildRewriteRow(record));
-            }
-        }
-
-        /// <summary>
-        /// Adds a grouped list of dependencies intentionally or implicitly kept shared.
-        /// </summary>
-        static void AddSharedRiskWriteGroup(VisualElement parent, string title, IEnumerable<AssetCloneIsolationRelationNode> nodes)
-        {
-            List<AssetCloneIsolationRelationNode> nodeList = nodes.ToList();
-            parent.Add(SectionLabel(title + " (" + nodeList.Count + ")"));
-            if (nodeList.Count == 0)
-            {
-                parent.Add(WrapLabel("无。"));
-                return;
-            }
-
-            foreach (AssetCloneIsolationRelationNode node in nodeList)
-            {
-                string detail = node.Decision == AssetCloneIsolationDecision.ExternalShared
-                    ? "外部共享风险，默认不写入目标目录；可在关系行选择迁移到目标。"
-                    : "SourceRoot 留在原地风险，不写入目标目录。";
-                parent.Add(WrapLabel(node.AssetPath + " | " + detail));
-            }
-        }
-
-        /// <summary>
-        /// Builds one relation row with quick locate and decision controls.
-        /// </summary>
-        VisualElement BuildRelationNodeRow(
-            AssetCloneIsolationRelationNode node,
-            AssetCloneIsolationPlan plan,
-            ArtToolContext context,
-            AssetCloneIsolationRootPlan rootPlan)
-        {
-            var row = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center, marginBottom = 2 } };
-            row.Add(FixedLabel(RelationDisplayText(node), 86));
-            row.Add(FixedLabel(node.AssetType, 92));
-            string pathText = new string(' ', Math.Min(node.Depth, 6) * 2) + node.AssetPath;
-            if (node.Decision == AssetCloneIsolationDecision.ExternalClone && !string.IsNullOrEmpty(node.TargetAssetPath))
-            {
-                pathText += " -> " + node.TargetAssetPath;
-            }
-
-            row.Add(WrapLabel(pathText, false, 1));
-            row.Add(ActionButton("定位", () => PingPath(node.AssetPath)));
-
-            if (!string.IsNullOrEmpty(node.TargetAssetPath) && File.Exists(AssetCloneIsolationUtility.ToProjectAbsolutePath(node.TargetAssetPath)))
-            {
-                row.Add(ActionButton("定位目标", () => PingPath(node.TargetAssetPath)));
-            }
-
-            if (CanToggleExplicitShared(node, rootPlan, plan))
-            {
-                string buttonText = node.Decision == AssetCloneIsolationDecision.ExplicitShared ? "跟随克隆" : "留在原地";
-                row.Add(ActionButton(buttonText, () =>
-                {
-                    if (node.Decision != AssetCloneIsolationDecision.ExplicitShared
-                        && !EditorUtility.DisplayDialog(
-                            "确认显式共享依赖",
-                            "该资源不会被克隆到 TargetRoot，TargetRoot 资源会继续引用 SourceRoot 中的原资源。\n\n" + node.AssetPath,
-                            "留在原地",
-                            "取消"))
-                    {
-                        return;
-                    }
-
-                    ToggleExplicitShared(node.AssetPath);
-                    ShowPlanPreview(context);
-                }));
-            }
-
-            if (CanToggleExternalClone(node, rootPlan, plan))
-            {
-                string buttonText = node.Decision == AssetCloneIsolationDecision.ExternalClone ? "取消迁移" : "迁移到目标";
-                row.Add(ActionButton(buttonText, () =>
-                {
-                    ToggleExternalClone(node.AssetPath);
-                    ShowPlanPreview(context);
-                }));
-            }
-
-            return row;
-        }
-
-        /// <summary>
-        /// Builds one target rewrite row.
-        /// </summary>
-        static VisualElement BuildRewriteRow(AssetCloneIsolationRewriteRecord record)
-        {
-            var row = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center, marginBottom = 2 } };
-            row.Add(FixedLabel("修复 GUID", 86));
-            row.Add(WrapLabel(record.AssetPath + " | 替换次数 " + record.ReplacementCount + " | 涉及 GUID 映射 " + record.GuidMappingCount, false, 1));
-            row.Add(ActionButton("定位", () => PingPath(record.AssetPath)));
-            return row;
-        }
-
-        /// <summary>
-        /// Builds one root asset row with quick locate actions.
-        /// </summary>
-        static VisualElement BuildAssetPathRow(string assetPath, string targetPath, bool bold)
-        {
-            var row = new VisualElement { style = { flexDirection = FlexDirection.Row, alignItems = Align.Center, marginBottom = 4 } };
-            row.Add(WrapLabel(assetPath + (string.IsNullOrEmpty(targetPath) ? "" : " -> " + targetPath), bold, 1));
-            row.Add(ActionButton("定位", () => PingPath(assetPath)));
-            return row;
+            chosen.Sort(StringComparer.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -737,6 +496,11 @@ namespace TA.ArtTools.Editor
         ArtToolReport BuildPlanReport(AssetCloneIsolationPlan plan)
         {
             var report = ArtToolReport.Empty(PanelTitle);
+            previewReport = report;
+            previewVersion = configurationVersion;
+            previewOptions = CreateOptions().Clone();
+            consumed = false;
+            report.ApplySummary = IsolationPreviewData.BuildApplySummary(plan);
             report.Changes.Add(ArtToolChange.Info(
                 "迁移计划汇总",
                 $"Root {plan.RootPlans.Count} 个，克隆资产 {plan.Assets.Count} 个，GUID 映射 {plan.GuidMap.Count} 个，外部共享 {plan.ExternalSharedDependencies.Count} 个，外部迁移 {plan.ExplicitCloneExternalDependencies.Count} 个，显式共享 {plan.ExplicitSharedDependencies.Count} 个，目标目录修复 {plan.TargetRewriteRecords.Count} 个，预计写入 {plan.WriteOperationCount} 项。",
@@ -796,16 +560,39 @@ namespace TA.ArtTools.Editor
                 report.Changes.Add(ArtToolChange.Info("共享依赖", dependencyPath, dependencyPath));
             }
 
-            if (!plan.HasErrors)
+            if (!plan.HasErrors && (plan.Assets.Count > 0 || plan.TargetRewriteRecords.Count > 0))
             {
                 report.Changes.Add(ArtToolChange.Write(
                     "应用资产克隆隔离计划",
                     $"写入克隆资产 {plan.Assets.Count} 个，并修复 TargetRoot 引用 {plan.TargetRewriteRecords.Count} 个文件。",
-                    () => AssetCloneIsolationService.ApplyPlan(plan),
+                    () => ExecutePreviewedPlan(plan, report),
                     plan.Options.TargetRoot));
             }
 
+            applyButton?.SetEnabled(CanApplyPreview(report));
+
             return report;
+        }
+
+        void ExecutePreviewedPlan(AssetCloneIsolationPlan plan, ArtToolReport report)
+        {
+            if (!CanApplyPreview(report)) throw new InvalidOperationException("计划已过期，请重新预览。");
+            consumed = true;
+            applyButton?.SetEnabled(false);
+            activeContext?.InvalidateCurrentReport?.Invoke("正在应用计划。");
+            previewWorkspace?.SetUnavailable("正在应用计划。");
+            try
+            {
+                AssetCloneIsolationService.ApplyPlan(plan);
+                string message = "计划已应用。可审计目标目录，或重新预览；此计划不能重复执行。";
+                previewWorkspace?.SetUnavailable(message);
+                activeContext?.Log?.Invoke(message);
+            }
+            catch
+            {
+                previewWorkspace?.SetUnavailable("应用失败，可能已有部分文件写入。请检查 Console 并重新预览。");
+                throw;
+            }
         }
 
         /// <summary>
@@ -813,6 +600,9 @@ namespace TA.ArtTools.Editor
         /// </summary>
         void ShowAuditReport(ArtToolContext context)
         {
+            previewReport = null;
+            previewVersion = -1;
+            applyButton?.SetEnabled(false);
             AssetCloneIsolationAuditReport auditReport = AssetCloneIsolationService.AuditTargetRoot(
                 targetRoot,
                 sourceRoot,
@@ -856,226 +646,7 @@ namespace TA.ArtTools.Editor
         {
             return plan.HasErrors
                 ? $"预览完成：{report.Changes.Count} 条结果，存在 {plan.Errors.Count} 个阻断错误。"
-                : $"预览完成：{report.Changes.Count} 条结果，可应用 {report.WriteCount} 条写入操作。";
-        }
-
-        /// <summary>
-        /// Builds one foldout title with root-local counts.
-        /// </summary>
-        static string BuildRootTitle(AssetCloneIsolationRootPlan rootPlan)
-        {
-            int cloneCount = rootPlan.DownstreamDependencies.Count(node => node.Decision == AssetCloneIsolationDecision.Clone);
-            int explicitSharedCount = rootPlan.DownstreamDependencies.Count(node => node.Decision == AssetCloneIsolationDecision.ExplicitShared);
-            int externalSharedCount = rootPlan.DownstreamDependencies.Count(node => node.Decision == AssetCloneIsolationDecision.ExternalShared);
-            int externalCloneCount = rootPlan.DownstreamDependencies.Count(node => node.Decision == AssetCloneIsolationDecision.ExternalClone);
-            int blockedCount = rootPlan.DownstreamDependencies.Count(node => node.Decision == AssetCloneIsolationDecision.BlockedExternal);
-            return $"{rootPlan.RootAssetPath} | 下游 {rootPlan.DownstreamDependencies.Count} | 克隆 {cloneCount} | 外部共享 {externalSharedCount} | 外部迁移 {externalCloneCount} | 显式共享 {explicitSharedCount} | 直接上游 {rootPlan.UpstreamReferences.Count} | 共享依赖引用 {rootPlan.SharedDependencyReferences.Count} | 修复 {rootPlan.TargetRewriteRecords.Count} | 阻断 {blockedCount}";
-        }
-
-        /// <summary>
-        /// Returns true when one relation node should be visible under the active filters.
-        /// </summary>
-        static bool NodePassesFilter(AssetCloneIsolationRelationNode node, string pathFilter, string decisionFilter, bool riskOnly)
-        {
-            if (node == null || !PathPassesFilter(node.AssetPath, pathFilter))
-            {
-                return false;
-            }
-
-            if (riskOnly
-                && node.RelationKind != AssetCloneIsolationRelationKind.SharedDependencyReference
-                && !IsRiskDecision(node.Decision))
-            {
-                return false;
-            }
-
-            if (string.IsNullOrEmpty(decisionFilter) || decisionFilter == "全部")
-            {
-                return true;
-            }
-
-            return DecisionText(node.Decision).IndexOf(decisionFilter, StringComparison.OrdinalIgnoreCase) >= 0
-                   || RelationDisplayText(node).IndexOf(decisionFilter, StringComparison.OrdinalIgnoreCase) >= 0
-                   || RelationFilterText(node).IndexOf(decisionFilter, StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        /// <summary>
-        /// Returns true when one path matches the text filter.
-        /// </summary>
-        static bool PathPassesFilter(string assetPath, string pathFilter)
-        {
-            return string.IsNullOrEmpty(pathFilter)
-                   || (!string.IsNullOrEmpty(assetPath)
-                       && assetPath.IndexOf(pathFilter, StringComparison.OrdinalIgnoreCase) >= 0);
-        }
-
-        /// <summary>
-        /// Returns true when the decision deserves risk-only visibility.
-        /// </summary>
-        static bool IsRiskDecision(AssetCloneIsolationDecision decision)
-        {
-            return decision == AssetCloneIsolationDecision.BlockedExternal
-                   || decision == AssetCloneIsolationDecision.MissingOrUnknown
-                   || decision == AssetCloneIsolationDecision.ExplicitShared
-                   || decision == AssetCloneIsolationDecision.ExternalShared;
-        }
-
-        /// <summary>
-        /// Returns true when the relation can be toggled between clone and explicit shared.
-        /// </summary>
-        static bool CanToggleExplicitShared(
-            AssetCloneIsolationRelationNode node,
-            AssetCloneIsolationRootPlan rootPlan,
-            AssetCloneIsolationPlan plan)
-        {
-            return node != null
-                   && rootPlan != null
-                   && plan != null
-                   && node.RelationKind == AssetCloneIsolationRelationKind.Dependency
-                   && !node.AssetPath.Equals(rootPlan.RootAssetPath, StringComparison.OrdinalIgnoreCase)
-                   && AssetCloneIsolationUtility.IsUnderRoot(node.AssetPath, plan.Options.SourceRoot)
-                   && !AssetCloneIsolationUtility.IsSharedCodeAssetPath(node.AssetPath)
-                   && (node.Decision == AssetCloneIsolationDecision.Clone
-                       || node.Decision == AssetCloneIsolationDecision.ExplicitShared);
-        }
-
-        /// <summary>
-        /// Returns true when an external dependency can be toggled between shared risk and target migration.
-        /// </summary>
-        static bool CanToggleExternalClone(
-            AssetCloneIsolationRelationNode node,
-            AssetCloneIsolationRootPlan rootPlan,
-            AssetCloneIsolationPlan plan)
-        {
-            return node != null
-                   && rootPlan != null
-                   && plan != null
-                   && node.RelationKind == AssetCloneIsolationRelationKind.Dependency
-                   && !node.AssetPath.Equals(rootPlan.RootAssetPath, StringComparison.OrdinalIgnoreCase)
-                   && node.AssetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)
-                   && !AssetCloneIsolationUtility.IsUnderRoot(node.AssetPath, plan.Options.SourceRoot)
-                   && !AssetCloneIsolationUtility.IsUnderRoot(node.AssetPath, plan.Options.TargetRoot)
-                   && !AssetCloneIsolationUtility.IsSharedCodeAssetPath(node.AssetPath)
-                   && (node.Decision == AssetCloneIsolationDecision.ExternalShared
-                       || node.Decision == AssetCloneIsolationDecision.ExternalClone);
-        }
-
-        /// <summary>
-        /// Toggles one dependency path in the explicit shared list.
-        /// </summary>
-        void ToggleExplicitShared(string assetPath)
-        {
-            string normalizedPath = AssetCloneIsolationUtility.NormalizeAssetPath(assetPath);
-            int index = explicitSharedPaths.FindIndex(path => path.Equals(normalizedPath, StringComparison.OrdinalIgnoreCase));
-            if (index >= 0)
-            {
-                explicitSharedPaths.RemoveAt(index);
-                return;
-            }
-
-            explicitSharedPaths.Add(normalizedPath);
-            explicitSharedPaths.Sort(StringComparer.OrdinalIgnoreCase);
-        }
-
-        /// <summary>
-        /// Toggles one external dependency path in the explicit external clone list.
-        /// </summary>
-        void ToggleExternalClone(string assetPath)
-        {
-            string normalizedPath = AssetCloneIsolationUtility.NormalizeAssetPath(assetPath);
-            int index = explicitCloneExternalPaths.FindIndex(path => path.Equals(normalizedPath, StringComparison.OrdinalIgnoreCase));
-            if (index >= 0)
-            {
-                explicitCloneExternalPaths.RemoveAt(index);
-                return;
-            }
-
-            explicitCloneExternalPaths.Add(normalizedPath);
-            explicitCloneExternalPaths.Sort(StringComparer.OrdinalIgnoreCase);
-        }
-
-        /// <summary>
-        /// Builds the path set belonging to one root graph.
-        /// </summary>
-        static HashSet<string> BuildRootGraphPathSet(AssetCloneIsolationRootPlan rootPlan)
-        {
-            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { rootPlan.RootAssetPath };
-            foreach (AssetCloneIsolationRelationNode node in rootPlan.DownstreamDependencies)
-            {
-                paths.Add(node.AssetPath);
-            }
-
-            return paths;
-        }
-
-        /// <summary>
-        /// Converts one decision to compact Chinese display text.
-        /// </summary>
-        static string DecisionText(AssetCloneIsolationDecision decision)
-        {
-            switch (decision)
-            {
-                case AssetCloneIsolationDecision.Clone:
-                    return "克隆";
-                case AssetCloneIsolationDecision.ExplicitShared:
-                    return "显式共享";
-                case AssetCloneIsolationDecision.ExternalShared:
-                    return "外部共享";
-                case AssetCloneIsolationDecision.ExternalClone:
-                    return "外部迁移";
-                case AssetCloneIsolationDecision.SharedDependency:
-                    return "共享";
-                case AssetCloneIsolationDecision.BlockedExternal:
-                    return "阻断";
-                case AssetCloneIsolationDecision.AlreadyInTarget:
-                    return "目标目录";
-                case AssetCloneIsolationDecision.ReferenceOnly:
-                    return "引用";
-                default:
-                    return "未知";
-            }
-        }
-
-        /// <summary>
-        /// Converts one relation node to the compact row label shown in relation tables.
-        /// </summary>
-        static string RelationDisplayText(AssetCloneIsolationRelationNode node)
-        {
-            if (node == null)
-            {
-                return "未知";
-            }
-
-            switch (node.RelationKind)
-            {
-                case AssetCloneIsolationRelationKind.UpstreamReference:
-                    return "直接上游";
-                case AssetCloneIsolationRelationKind.SharedDependencyReference:
-                    return "共享依赖";
-                default:
-                    return DecisionText(node.Decision);
-            }
-        }
-
-        /// <summary>
-        /// Converts one relation node to the broader text used by the relation filter.
-        /// </summary>
-        static string RelationFilterText(AssetCloneIsolationRelationNode node)
-        {
-            if (node == null)
-            {
-                return string.Empty;
-            }
-
-            switch (node.RelationKind)
-            {
-                case AssetCloneIsolationRelationKind.UpstreamReference:
-                    return "直接上游";
-                case AssetCloneIsolationRelationKind.SharedDependencyReference:
-                    return "共享依赖引用";
-                default:
-                    return DecisionText(node.Decision);
-            }
+                : "预览完成：" + IsolationPreviewData.BuildApplySummary(plan);
         }
 
         /// <summary>
@@ -1097,6 +668,7 @@ namespace TA.ArtTools.Editor
             explicitSharedPaths.AddRange(preset.ExplicitSharedAssetPaths ?? new List<string>());
             explicitCloneExternalPaths.Clear();
             explicitCloneExternalPaths.AddRange(preset.ExplicitCloneExternalAssetPaths ?? new List<string>());
+            MarkPlanDirty();
         }
 
         /// <summary>
@@ -1152,14 +724,6 @@ namespace TA.ArtTools.Editor
         }
 
         /// <summary>
-        /// Creates a section label used inside relationship foldouts.
-        /// </summary>
-        static Label SectionLabel(string text)
-        {
-            return new Label(text) { style = { unityFontStyleAndWeight = FontStyle.Bold, marginTop = 6, marginBottom = 2 } };
-        }
-
-        /// <summary>
         /// Creates a fixed-width preset action button that stays left-aligned in narrow panels.
         /// </summary>
         static Button PresetActionButton(string text, Action clicked, float width)
@@ -1184,15 +748,6 @@ namespace TA.ArtTools.Editor
         }
 
         /// <summary>
-        /// Creates a fixed-width label.
-        /// </summary>
-        static Label FixedLabel(string text, float width)
-        {
-            var label = new Label(text) { style = { width = width, marginRight = 4 } };
-            return label;
-        }
-
-        /// <summary>
         /// Creates a wrapping label that can grow inside row layouts.
         /// </summary>
         static Label WrapLabel(string text, bool bold = false, float flexGrow = 0)
@@ -1206,18 +761,6 @@ namespace TA.ArtTools.Editor
             }
 
             return label;
-        }
-
-        /// <summary>
-        /// Pings one asset path in the Project window.
-        /// </summary>
-        static void PingPath(string assetPath)
-        {
-            UnityEngine.Object asset = AssetDatabase.LoadMainAssetAtPath(assetPath);
-            if (asset != null)
-            {
-                EditorGUIUtility.PingObject(asset);
-            }
         }
 
     }

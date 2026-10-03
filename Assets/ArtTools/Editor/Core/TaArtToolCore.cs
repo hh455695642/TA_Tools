@@ -82,6 +82,7 @@ namespace TA.ArtTools.Editor
     public sealed class ArtToolReport
     {
         public string ToolName;
+        public string ApplySummary;
         public readonly List<ArtToolChange> Changes = new List<ArtToolChange>();
         public readonly List<string> Logs = new List<string>();
 
@@ -131,6 +132,8 @@ namespace TA.ArtTools.Editor
         public Action<ArtToolReport> ShowReport;
         public Action<VisualElement, string> ShowCustomView;
         public Action<ArtToolReport, VisualElement, string> ShowCustomReportView;
+        public Action<ArtToolReport, VisualElement, string> ShowCustomReportWorkspace;
+        public Action<string> InvalidateCurrentReport;
         public Action ExportCurrentReport;
         public Action<string> Log;
         public Func<ArtToolReport> CurrentReport;

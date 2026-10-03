@@ -26,6 +26,7 @@ namespace TA.ArtTools.Editor
         ScrollView moduleScroll;
         ScrollView helpScroll;
         ScrollView resultScroll;
+        VisualElement resultHost;
         Label statusLabel;
 
         [MenuItem("Tools/TA/Art Tools")]
@@ -147,10 +148,15 @@ namespace TA.ArtTools.Editor
             statusLabel.style.marginBottom = 4;
             previewPanel.Add(statusLabel);
 
+            resultHost = new VisualElement();
+            resultHost.style.flexGrow = 1;
+            resultHost.style.minHeight = 0;
+            resultHost.style.overflow = Overflow.Hidden;
+            previewPanel.Add(resultHost);
             resultScroll = new ScrollView();
             resultScroll.style.flexGrow = 1;
             resultScroll.style.minHeight = 0;
-            previewPanel.Add(resultScroll);
+            resultHost.Add(resultScroll);
 
             moduleButtons.Clear();
             foreach (KeyValuePair<string, List<IArtToolModule>> categoryGroup in BuildModuleCategoryGroups())
@@ -203,6 +209,7 @@ namespace TA.ArtTools.Editor
             currentReport = null;
             moduleScroll.Clear();
             resultScroll.Clear();
+            UseScrollableResults();
 
             foreach (KeyValuePair<IArtToolModule, Button> pair in moduleButtons)
                 pair.Value.SetEnabled(pair.Key != activeModule);
@@ -221,6 +228,8 @@ namespace TA.ArtTools.Editor
                 ShowReport = ShowReport,
                 ShowCustomView = ShowCustomView,
                 ShowCustomReportView = ShowCustomReportView,
+                ShowCustomReportWorkspace = ShowCustomReportWorkspace,
+                InvalidateCurrentReport = InvalidateCurrentReport,
                 ExportCurrentReport = ExportCurrentReport,
                 Log = SetStatus,
                 CurrentReport = () => currentReport
@@ -290,6 +299,7 @@ namespace TA.ArtTools.Editor
 
         void ShowCustomView(VisualElement view, string status)
         {
+            UseScrollableResults();
             currentReport = null;
             resultScroll.Clear();
             if (view != null)
@@ -301,12 +311,36 @@ namespace TA.ArtTools.Editor
 
         void ShowCustomReportView(ArtToolReport report, VisualElement view, string status)
         {
+            UseScrollableResults();
             currentReport = report;
             resultScroll.Clear();
             if (view != null)
                 resultScroll.Add(view);
 
             SetStatus(string.IsNullOrEmpty(status) ? "就绪。" : status);
+            UpdateButtons();
+        }
+
+        void UseScrollableResults()
+        {
+            resultHost.Clear();
+            resultHost.Add(resultScroll);
+        }
+
+        void ShowCustomReportWorkspace(ArtToolReport report, VisualElement view, string status)
+        {
+            currentReport = report;
+            resultScroll.Clear();
+            resultHost.Clear();
+            if (view != null)
+                resultHost.Add(view);
+            SetStatus(status);
+        }
+
+        void InvalidateCurrentReport(string status)
+        {
+            currentReport = null;
+            SetStatus(status);
             UpdateButtons();
         }
 
@@ -327,9 +361,14 @@ namespace TA.ArtTools.Editor
                 return;
             }
 
+            ArtToolReport applyingReport = currentReport;
+            IArtToolModule applyingModule = activeModule;
+
             bool confirm = EditorUtility.DisplayDialog(
                 "应用 TA 美术工具变更",
-                $"工具：{activeModule.PanelTitle}\n待写入变更：{currentReport.WriteCount}\n\n执行前请确认项目已纳入版本管理。",
+                $"工具：{activeModule.PanelTitle}\n" + (string.IsNullOrEmpty(applyingReport.ApplySummary)
+                    ? $"待写入变更：{applyingReport.WriteCount}"
+                    : applyingReport.ApplySummary) + "\n\n执行前请确认项目已纳入版本管理。",
                 "应用",
                 "取消");
 
@@ -338,8 +377,11 @@ namespace TA.ArtTools.Editor
 
             try
             {
-                activeModule.Apply(currentReport);
-                SetStatus($"{activeModule.PanelTitle}：已应用 {currentReport.WriteCount} 条变更，请重新扫描刷新结果。");
+                if (!ReferenceEquals(currentReport, applyingReport) || activeModule != applyingModule)
+                    throw new InvalidOperationException("计划已变化，请重新预览。");
+                applyingModule.Apply(applyingReport);
+                if (ReferenceEquals(currentReport, applyingReport))
+                    SetStatus($"{applyingModule.PanelTitle}：已应用 {applyingReport.WriteCount} 条变更，请重新扫描刷新结果。");
             }
             catch (Exception e)
             {
@@ -368,6 +410,7 @@ namespace TA.ArtTools.Editor
 
         void RenderReport(ArtToolReport report)
         {
+            UseScrollableResults();
             resultScroll.Clear();
             if (report == null)
                 return;
