@@ -1,0 +1,62 @@
+// Adapted from codewings/PreIntegrated-Skin, commit 2bf0e8b44f21afd01e51353681379811d240876d.
+// Original profile reference: https://www.shadertoy.com/view/NdBGDz
+#pragma kernel CSMain
+#pragma multi_compile _ KEEP_DIRECT_BOUNCE
+
+#define PI 3.1415926
+
+RWTexture2D<float4> _IntegratedLUT;
+float4 _FalloffColor;
+int _Resolution;
+
+float3 SeparableSSS_Gaussian(float variance, float r, float3 falloff)
+{
+    float3 rr = r / (0.001 + falloff);
+    return exp(-(rr * rr) / (2.0 * variance)) / (2.0 * PI * variance);
+}
+
+float3 DiffusionProfile(float r)
+{
+    // Red-channel d'Eon profile reused for RGB, scaled by per-channel falloff.
+    float3 falloff = _FalloffColor.rgb;
+    return float3(0.0, 0.0, 0.0)
+#ifdef KEEP_DIRECT_BOUNCE
+        + 0.233 * SeparableSSS_Gaussian(0.0064, r, falloff)
+#endif
+        + 0.100 * SeparableSSS_Gaussian(0.0484, r, falloff)
+        + 0.118 * SeparableSSS_Gaussian(0.187, r, falloff)
+        + 0.113 * SeparableSSS_Gaussian(0.567, r, falloff)
+        + 0.358 * SeparableSSS_Gaussian(1.99, r, falloff)
+        + 0.078 * SeparableSSS_Gaussian(7.41, r, falloff);
+}
+
+float3 GenSkinLUT(float2 uv)
+{
+    // Zero curvature means infinite radius: use the flat-surface limit.
+    // Preserve the source's id/resolution sample grid for all other rows.
+    if (uv.y <= 0.0) return saturate(uv.x * 2.0 - 1.0).xxx;
+    float theta = acos(clamp(uv.x * 2.0 - 1.0, -1.0, 1.0));
+    float radius = 1.0 / uv.y;
+    float3 scattering = 0.0;
+    float3 normalization = 0.0;
+    for (float x = -PI / 2.0; x < PI / 2.0; x += PI * 0.001)
+    {
+        float dist = 2.0 * radius * sin(x * 0.5);
+        float3 profile = DiffusionProfile(dist);
+        scattering += max(0.0, cos(x + theta)) * profile;
+        normalization += profile;
+    }
+    float3 result = scattering / max(normalization, 1e-20);
+    // Very narrow profiles can underflow between integration samples.
+    float flat = saturate(uv.x * 2.0 - 1.0);
+    return float3(normalization.r > 1e-20 ? result.r : flat,
+                  normalization.g > 1e-20 ? result.g : flat,
+                  normalization.b > 1e-20 ? result.b : flat);
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Resolution || id.y >= (uint)_Resolution) return;
+    _IntegratedLUT[id.xy] = float4(GenSkinLUT((float2)id.xy / (float)_Resolution), 1.0);
+}

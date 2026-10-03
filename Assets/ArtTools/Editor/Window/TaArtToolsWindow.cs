@@ -42,12 +42,19 @@ namespace TA.ArtTools.Editor
             modules.Clear();
             modules.Add(new TaAstcFormatModule());
             modules.Add(new TaVfxTextureOptimizerModule());
+            modules.Add(new TaPreIntegratedLutModule());
             modules.Add(new TaMeshUsageModule());
             modules.Add(new TaTextureUsageModule());
             modules.Add(new TaShaderUsageModule());
             modules.Add(new TaSimpleLitRefreshModule());
             modules.Add(new TaAssetCloneIsolationModule());
             modules.Add(new TaDisabledRendererCleanerModule());
+        }
+
+        void OnDisable()
+        {
+            foreach (IArtToolModule module in modules)
+                (module as IDisposable)?.Dispose();
         }
 
         public void CreateGUI()
